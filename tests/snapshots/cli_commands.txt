@@ -1,0 +1,143 @@
+# sonote CLI 명령 surface 스냅샷
+# 생성일: 2026-03-16
+# 추출: uv run sonote schema
+
+=== sonote transcribe ===
+  <positional> audio [required] — 오디오 파일 경로 (WAV, MP3 등)
+  -o, --output output [optional] — 출력 파일 경로 (기본: 입력파일_transcript.txt)
+  -m, --model model [optional] (default: large-v3-turbo) — Whisper 모델 (기본: large-v3-turbo)
+  -l, --language language [optional] (default: ko) — 언어 코드 (기본: ko)
+  --cpu cpu [optional] (default: False) — CPU 강제 사용
+  --fmt fmt [optional] (default: txt) — 출력 형식 (기본: txt)
+  --beam beam [optional] (default: 5) — 빔 서치 크기 (기본: 5)
+  --chunk-minutes chunk_minutes [optional] (default: 0) — 청크 단위(분) 분할 변환 — 긴 파일용 (기본: 0=단일 처리)
+  --dry-run dry_run [optional] (default: False) — 실제 전사 없이 설정값만 출력 (--json과 함께 사용 권장)
+
+=== sonote live ===
+  <positional> url [required] — YouTube URL
+  -o, --output output [optional] — 출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)
+  -b, --back back [optional] (default: 0) — N분 전부터 시작 (기본: 0=현재)
+  -d, --duration duration [optional] (default: 50) — 녹음 시간(분) (기본: 50)
+  -m, --model model [optional] (default: large-v3-turbo) — Whisper 모델
+  -l, --language language [optional] (default: ko) — 언어 코드
+  --cpu cpu [optional] (default: False) — CPU 강제 사용
+  --cookies cookies [optional] — cookies.txt 경로 (미지정 시 자동 탐색: SONOTE_COOKIES → ./cookies.txt → output/data/cookies.txt)
+  --fmt fmt [optional] (default: txt) — 출력 형식
+  --resume resume [optional] — 기존 스크립트 파일과 이어붙이기 (오버랩 자동 제거)
+  --continuous continuous [optional] (default: False) — 연속 변환 모드 (Ctrl+C로 종료)
+  --chunk-size chunk_size [optional] (default: 120) — 연속 모드 청크 크기(초) (기본: 120)
+  --auto-start auto_start [optional] (default: False) — BGM 구간을 건너뛰고 강의 시작 지점 자동 탐색
+
+=== sonote detect ===
+  <positional> url [required] — YouTube URL
+  --max-back max_back [optional] (default: 180) — 최대 탐색 범위(분) (기본: 180)
+
+=== sonote map ===
+  <positional> url [required] — YouTube URL
+  --max-back max_back [optional] (default: 180) — 최대 탐색 범위(분) (기본: 180)
+  --step step [optional] (default: 5) — 프로브 간격(분) (기본: 5)
+  --force-scan force_scan [optional] (default: False) — DB 캐시 무시, 강제 재스캔
+
+=== sonote auto ===
+  <positional> url [required] — YouTube URL
+  -o, --output output [optional] — 출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)
+  -m, --model model [optional] (default: large-v3-turbo) — Whisper 모델
+  -l, --language language [optional] (default: ko) — 언어 코드
+  --cpu cpu [optional] (default: False) — CPU 강제 사용
+  --cookies cookies [optional] — cookies.txt 경로 (미지정 시 자동 탐색: SONOTE_COOKIES → ./cookies.txt → output/data/cookies.txt)
+  --fmt fmt [optional] (default: txt) — 출력 형식
+  --max-back max_back [optional] (default: 180) — 최대 탐색 범위(분) (기본: 180)
+  --step step [optional] (default: 5) — 스캔 프로브 간격(분) (기본: 5)
+  --resume resume [optional] — 기존 스크립트와 병합
+  --force-scan force_scan [optional] (default: False) — DB 캐시 무시, 강제 재스캔
+  --watch watch [optional] (default: 0) — 주기적 증분 캡처 간격(분). 0이면 1회만 실행 (기본: 0)
+
+=== sonote profile ===
+
+=== sonote cookies ===
+
+=== sonote download ===
+  <positional> url [required] — YouTube URL
+  -o, --output output [optional] (default: live_audio.wav) — 출력 파일
+  -b, --back back [optional] (default: 0) — N분 전부터 시작
+  -d, --duration duration [optional] (default: 50) — 녹음 시간(분)
+
+=== sonote enroll ===
+  <positional> name [optional] — 등록할 화자 이름
+  --duration duration [optional] (default: 15) — 녹음 시간(초) (기본: 15, 최소: 5)
+  --profiles profiles [optional] — 프로필 파일 경로 (기본: output/data/speakers.json)
+  --device device [optional] — 오디오 입력 장치 인덱스
+  --list list_profiles [optional] (default: False) — 등록된 화자 목록 출력
+  --delete delete [optional] — 화자 삭제
+  --cpu cpu [optional] (default: False) — CPU 강제 사용
+
+=== sonote meeting ===
+  --no-diarize no_diarize [optional] (default: False) — 화자 분리 비활성화
+  --port port [optional] (default: 8000) — SSE 서버 포트 (기본: 8000)
+  -o, --output output [optional] — 출력 파일 경로 (기본: output/meetings/YYYY-MM-DD/meeting_HHMMSS.md)
+  --chunk chunk [optional] (default: 15.0) — 오디오 청크 크기(초) (기본: 15.0)
+  --device device [optional] — 오디오 입력 장치 인덱스
+  --list-devices list_devices [optional] (default: False) — 사용 가능한 마이크 목록 출력
+  --profiles profiles [optional] — 화자 프로필 JSON (enroll로 생성, 화자 분리 정확도 향상)
+  --auto-update auto_update [optional] (default: False) — 회의 종료 시 승인 대기 프로필 스냅샷 생성
+  -m, --model model [optional] (default: large-v3-turbo) — Whisper 모델 (기본: large-v3-turbo)
+  -l, --language language [optional] (default: ko) — 언어 코드 (기본: ko)
+  --cpu cpu [optional] (default: False) — CPU 강제 사용
+  --prompt prompt [optional] — Whisper initial_prompt (한국어 힌트)
+  --no-polish no_polish [optional] (default: False) — LLM 후처리 비활성화
+  --ollama ollama [optional] (default: False) — Ollama 로컬 LLM으로 STT 교정/키워드 추출
+  --ollama-model ollama_model [optional] (default: gemma3:27b) — Ollama 모델명 (기본: gemma3:27b)
+  --fixed-chunking fixed_chunking [optional] (default: False) — 휴리스틱 청킹 비활성화
+  --dry-run dry_run [optional] (default: False) — 실제 전사 없이 설정값만 출력
+  --auto-mute auto_mute [optional] (default: False) — 녹음 시작 시 다른 미디어 앱 자동 음소거
+
+=== sonote desktop ===
+  --host host [optional] (default: 127.0.0.1) — 내장 FastAPI 서버 호스트 (기본: 127.0.0.1)
+  --port port [optional] (default: 0) — 내장 FastAPI 서버 포트 (기본: 0=자동 선택)
+
+=== sonote status ===
+
+=== sonote autostart ===
+  --enable enable [optional] (default: False) — 현재 실행 경로를 Windows 자동 시작에 등록
+  --disable disable [optional] (default: False) — Windows 자동 시작 등록 해제
+  --status status [optional] (default: False) — 현재 실행 경로의 자동 시작 등록 상태 확인
+
+=== sonote doctor ===
+  --json doctor_json [optional] (default: False) — JSON 형식으로 출력 (AI 에이전트용)
+
+=== sonote approve ===
+  <positional> review [required] — meeting *.profile-review.json 경로
+  --profiles profiles [optional] — 적용 대상 프로필 JSON
+
+=== sonote update ===
+  --check check [optional] (default: False) — 업데이트 가능 여부만 확인
+  --install install [optional] (default: False) — 최신 버전 다운로드 후 설치
+  --json update_json [optional] (default: False) — JSON 형식으로 출력
+
+=== sonote probe ===
+  <positional> url [required] — YouTube URL
+  --max-back max_back [optional] (default: 180) — 최대 탐색 범위(분)
+
+=== sonote scan ===
+  <positional> url [required] — YouTube URL
+  --max-back max_back [optional] (default: 180) — 최대 탐색 범위(분)
+  --step step [optional] (default: 5) — 프로브 간격(분)
+  --force-scan force_scan [optional] (default: False) — DB 캐시 무시
+
+=== sonote smart ===
+  <positional> url [required] — YouTube URL
+  -o, --output output [optional] — 출력 디렉토리
+  -m, --model model [optional] (default: large-v3-turbo) — Whisper 모델
+  -l, --language language [optional] (default: ko) — 언어 코드
+  --cpu cpu [optional] (default: False) — CPU 강제 사용
+  --cookies cookies [optional] — cookies.txt 경로 (미지정 시 자동 탐색)
+  --fmt fmt [optional] (default: txt) — 출력 형식
+  --max-back max_back [optional] (default: 180) — 최대 탐색 범위(분)
+  --step step [optional] (default: 5) — 스캔 프로브 간격(분)
+  --resume resume [optional] — 기존 스크립트와 병합
+  --force-scan force_scan [optional] (default: False) — DB 캐시 무시
+  --watch watch [optional] (default: 0) — 주기적 증분 캡처 간격(분)
+
+=== sonote approve-profiles ===
+  <positional> review [required] — meeting *.profile-review.json 경로
+  --profiles profiles [optional] — 적용 대상 프로필 JSON

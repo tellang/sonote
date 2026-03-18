@@ -1376,6 +1376,132 @@
             width: 0;
         }
 
+        /* 세션 전환 시 자동 Live PiP 오버레이 */
+        .live-pip-overlay {
+            position: fixed;
+            width: 300px;
+            height: 200px;
+            z-index: 220;
+            background: color-mix(in oklch, var(--surface-1) 88%, transparent);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            box-shadow: 0 12px 36px oklch(0 0 0 / 0.35);
+            backdrop-filter: blur(14px) saturate(130%);
+            -webkit-backdrop-filter: blur(14px) saturate(130%);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .live-pip-overlay .pip-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border-subtle);
+            cursor: move;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        .live-pip-overlay .pip-header-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        .live-pip-overlay .pip-title {
+            font-size: var(--text-xs);
+            color: var(--text-secondary);
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .live-pip-overlay .pip-live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--danger);
+            box-shadow: 0 0 10px color-mix(in oklch, var(--danger) 65%, transparent);
+            animation: pip-pulse 2s infinite;
+            flex-shrink: 0;
+        }
+
+        .live-pip-overlay .pip-close-btn {
+            width: 26px;
+            height: 26px;
+            border: 1px solid var(--border-subtle);
+            background: oklch(var(--overlay-base) / 0.04);
+            color: var(--text-secondary);
+            border-radius: 8px;
+            line-height: 1;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
+            flex-shrink: 0;
+        }
+
+        .live-pip-overlay .pip-close-btn:hover {
+            background: oklch(var(--overlay-base) / 0.12);
+            color: var(--text-primary);
+            border-color: color-mix(in oklch, var(--accent) 35%, var(--border-subtle));
+        }
+
+        .live-pip-overlay .pip-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 10px 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .live-pip-overlay .pip-content p {
+            margin: 0;
+            display: grid;
+            grid-template-columns: auto auto 1fr;
+            gap: 8px;
+            align-items: start;
+            font-size: var(--text-xs);
+            line-height: 1.35;
+            opacity: 0.92;
+        }
+
+        .live-pip-overlay .pip-content .timestamp {
+            font-size: 0.64rem;
+            color: var(--text-tertiary);
+        }
+
+        .live-pip-overlay .pip-content .speaker-label {
+            min-width: 26px;
+            font-size: 0.64rem;
+            padding: 1px 4px;
+            border-radius: 999px;
+            line-height: 1.2;
+        }
+
+        .live-pip-overlay .pip-content .text {
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+
+        .live-pip-overlay .pip-empty {
+            margin: auto;
+            font-size: var(--text-xs);
+            color: var(--text-tertiary);
+            text-align: center;
+        }
+
+        body.pip-dragging {
+            user-select: none;
+            cursor: grabbing;
+        }
+
         /* 최근 3개 문장까지 단계별 강조 (가장 최근이 가장 밝음) */
         #transcript p:last-child {
             opacity: 1;
@@ -2536,6 +2662,52 @@
         .sp-save-status.ok { color: var(--ok); }
         .sp-save-status.error { color: var(--danger); }
 
+        /* === 토스트 알림 === */
+        .toast-container {
+            position: fixed;
+            right: 16px;
+            bottom: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 1500;
+            pointer-events: none;
+            max-width: min(360px, calc(100vw - 24px));
+        }
+        .toast {
+            position: relative;
+            border-radius: 12px;
+            border: 1px solid var(--border-subtle);
+            border-left: 4px solid var(--accent);
+            background: color-mix(in oklch, var(--surface-2) 92%, var(--surface-base) 8%);
+            color: var(--text-primary);
+            padding: 10px 12px;
+            font-size: var(--text-sm);
+            line-height: 1.4;
+            box-shadow: 0 10px 24px oklch(0 0 0 / 0.25);
+            transform: translateX(24px);
+            opacity: 0;
+            transition: transform var(--dur-normal) var(--ease-out-expo),
+                        opacity var(--dur-normal) var(--ease-out-expo);
+            pointer-events: auto;
+            cursor: pointer;
+        }
+        .toast.show {
+            transform: translateX(0);
+            opacity: 1;
+        }
+        .toast.hiding {
+            transform: translateX(24px);
+            opacity: 0;
+        }
+        .toast.info { border-left-color: var(--accent); }
+        .toast.success { border-left-color: var(--ok); }
+        .toast.warning { border-left-color: var(--warn); }
+        .toast.error {
+            border-left-color: var(--danger);
+            background: color-mix(in oklch, var(--surface-2) 84%, var(--danger) 16%);
+        }
+
         /* === 타이핑 인디케이터 (전사 영역 하단) === */
         .typing-indicator {
             display: none;
@@ -3056,6 +3228,8 @@
         </div>
     </div>
 
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+
     <script>
         /* === 테마 모드 관리 === */
         function initTheme() {
@@ -3390,6 +3564,49 @@
             setTimeout(() => { el.className = "sp-save-status"; }, 2500);
         }
 
+        function showToast(message, type = "info") {
+            const container = document.getElementById("toast-container");
+            if (!container) return;
+
+            const text = String(message || "").trim();
+            if (!text) return;
+            const toastType = ["info", "success", "error", "warning"].includes(type) ? type : "info";
+
+            const toast = document.createElement("div");
+            toast.className = `toast ${toastType}`;
+            toast.setAttribute("role", toastType === "error" ? "alert" : "status");
+            toast.textContent = text;
+            container.appendChild(toast);
+
+            let dismissed = false;
+            const dismiss = () => {
+                if (dismissed) return;
+                dismissed = true;
+                toast.classList.remove("show");
+                toast.classList.add("hiding");
+                setTimeout(() => {
+                    if (toast.parentNode) toast.parentNode.removeChild(toast);
+                }, 250);
+            };
+
+            requestAnimationFrame(() => {
+                toast.classList.add("show");
+            });
+
+            const timer = setTimeout(dismiss, 3000);
+            toast.addEventListener("click", () => {
+                clearTimeout(timer);
+                dismiss();
+            }, { once: true });
+        }
+
+        function showErrorToast(error, fallbackMessage = "오류가 발생했습니다") {
+            const message = (error && typeof error.message === "string" && error.message.trim())
+                ? error.message.trim()
+                : fallbackMessage;
+            showToast(message, "error");
+        }
+
         /* === 스크린 리더 집약 알림 (5초 간격) === */
         let _srPendingCount = 0;
         let _srTimer = null;
@@ -3506,6 +3723,7 @@
                 sidebarBackdrop.classList.remove("visible");
                 AppState.sidebarOpen = true;
             }
+            clampLivePiPPosition();
         });
 
         /* === 세션 목록 로드 === */
@@ -3758,6 +3976,11 @@
             AppState.currentView = "history";
             AppState.currentSessionId = sessionId;
 
+            // 문서 PiP가 떠 있으면 닫고, 세션 전환용 Live PiP로 전환
+            if (pipWindow) {
+                try { pipWindow.close(); } catch (e) { /* 무시 */ }
+            }
+
             // SSE 연결 일시 중단
             if (source) {
                 source.close();
@@ -3775,7 +3998,7 @@
             if (Array.isArray(segments) && segments.length > 0) {
                 // globalSegmentIndex를 리셋하지 않음 (충돌 방지)
                 for (const seg of segments) {
-                    appendTranscript(seg);
+                    appendTranscript(seg, { syncPiP: false });
                 }
                 // 상단으로 스크롤
                 transcriptEl.scrollTop = 0;
@@ -3807,6 +4030,9 @@
             // 사이드바 활성 항목 갱신
             updateSidebarActive();
 
+            // 과거 세션 조회 시 실시간 스트림을 오버레이 PiP로 유지
+            activateLivePiP();
+
             // 컨트롤 비활성화 (과거 세션에서는 녹음 관련 버튼 숨김)
             pauseBtn.style.display = "none";
             const saveBtn = document.getElementById("btn-save-session");
@@ -3821,6 +4047,8 @@
 
         /* === 실시간 세션으로 복귀 === */
         function returnToLiveSession() {
+            deactivateLivePiP({ restoreLiveView: false });
+
             // 실시간 복귀 시 뷰 상태를 먼저 확정
             AppState.currentView = "live";
             AppState.currentSessionId = null;
@@ -3866,7 +4094,10 @@
 
             try {
                 const res = await fetch("/api/sessions/new", { method: "POST" });
-                if (!res.ok) throw new Error("새 세션 시작 실패");
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ detail: "새 세션 시작 실패" }));
+                    throw new Error(err.detail || "새 세션 시작 실패");
+                }
 
                 // 가상 스크롤 리셋 + 메인 영역 리셋
                 VirtualScroll.reset();
@@ -3887,8 +4118,10 @@
 
                 // SSE 재연결
                 connectStream();
+                showToast("새 세션이 시작되었습니다", "success");
             } catch (e) {
                 console.error("[사이드바] 새 세션 시작 실패:", e.message);
+                showErrorToast(e, "새 세션 시작 실패");
             }
         }
 
@@ -3960,6 +4193,205 @@
         const WS_MAX_RECONNECT_DELAY = 30000; // 30초
 
         let pipWindow = null;
+        let livePipOverlayEl = null;
+        let livePipContentEl = null;
+        let livePipSource = null;
+        let livePipDragState = null;
+        const LIVE_PIP_MARGIN = 20;
+
+        function appendLivePiPSegment(item) {
+            if (!livePipContentEl) return;
+
+            const code = String(item?.speaker || "?").toUpperCase();
+            const nextText = String(item?.text || "").trim();
+            const nextTs = String(item?.ts || "--:--:--").trim() || "--:--:--";
+            if (!nextText) return;
+
+            const empty = livePipContentEl.querySelector(".pip-empty");
+            if (empty) empty.remove();
+
+            const line = document.createElement("p");
+            const ts = document.createElement("span");
+            ts.className = "timestamp";
+            ts.textContent = nextTs;
+
+            const speaker = document.createElement("span");
+            speaker.className = `speaker-label ${toSpeakerClass(code)}`;
+            speaker.textContent = `[${code}]`;
+
+            const text = document.createElement("span");
+            text.className = "text";
+            text.textContent = nextText;
+
+            line.append(ts, speaker, text);
+            livePipContentEl.appendChild(line);
+
+            if (livePipContentEl.childElementCount > 400) {
+                livePipContentEl.removeChild(livePipContentEl.firstElementChild);
+            }
+            livePipContentEl.scrollTop = livePipContentEl.scrollHeight;
+        }
+
+        async function seedLivePiPHistory() {
+            if (!livePipContentEl) return;
+            try {
+                const res = await fetch("/history", { cache: "no-store" });
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!Array.isArray(data) || !data.length) return;
+
+                const seed = data.slice(-25);
+                for (const seg of seed) {
+                    appendLivePiPSegment(seg);
+                }
+            } catch (e) {
+                console.debug("[LivePiP] 초기 이력 로드 실패:", e.message);
+            }
+        }
+
+        function clampLivePiPPosition() {
+            if (!livePipOverlayEl) return;
+            const rect = livePipOverlayEl.getBoundingClientRect();
+            const maxLeft = Math.max(0, window.innerWidth - rect.width);
+            const maxTop = Math.max(0, window.innerHeight - rect.height);
+            const left = Math.min(Math.max(0, rect.left), maxLeft);
+            const top = Math.min(Math.max(0, rect.top), maxTop);
+            livePipOverlayEl.style.left = `${left}px`;
+            livePipOverlayEl.style.top = `${top}px`;
+            livePipOverlayEl.style.right = "auto";
+            livePipOverlayEl.style.bottom = "auto";
+        }
+
+        function handleLivePiPDragMove(e) {
+            if (!livePipOverlayEl || !livePipDragState) return;
+            const maxLeft = Math.max(0, window.innerWidth - livePipOverlayEl.offsetWidth);
+            const maxTop = Math.max(0, window.innerHeight - livePipOverlayEl.offsetHeight);
+            const nextLeft = Math.min(Math.max(0, e.clientX - livePipDragState.offsetX), maxLeft);
+            const nextTop = Math.min(Math.max(0, e.clientY - livePipDragState.offsetY), maxTop);
+            livePipOverlayEl.style.left = `${nextLeft}px`;
+            livePipOverlayEl.style.top = `${nextTop}px`;
+            livePipOverlayEl.style.right = "auto";
+            livePipOverlayEl.style.bottom = "auto";
+        }
+
+        function stopLivePiPDrag() {
+            livePipDragState = null;
+            document.body.classList.remove("pip-dragging");
+            document.removeEventListener("mousemove", handleLivePiPDragMove);
+            document.removeEventListener("mouseup", stopLivePiPDrag);
+        }
+
+        function startLivePiPDrag(e) {
+            if (!livePipOverlayEl || e.button !== 0) return;
+            if (e.target.closest(".pip-close-btn")) return;
+            const rect = livePipOverlayEl.getBoundingClientRect();
+            livePipDragState = {
+                offsetX: e.clientX - rect.left,
+                offsetY: e.clientY - rect.top,
+            };
+            document.body.classList.add("pip-dragging");
+            document.addEventListener("mousemove", handleLivePiPDragMove);
+            document.addEventListener("mouseup", stopLivePiPDrag);
+            e.preventDefault();
+        }
+
+        function ensureLivePiPStream() {
+            if (livePipSource) return;
+
+            livePipSource = new EventSource("/stream");
+            livePipSource.onmessage = (event) => {
+                try {
+                    appendLivePiPSegment(JSON.parse(event.data));
+                } catch (e) {
+                    console.debug("[LivePiP] 메시지 파싱 실패:", e.message);
+                }
+            };
+            livePipSource.addEventListener("session_created", loadSessionList);
+            livePipSource.addEventListener("session_updated", loadSessionList);
+            livePipSource.addEventListener("session_deleted", loadSessionList);
+            livePipSource.onerror = () => {
+                if (!livePipOverlayEl && livePipSource) {
+                    livePipSource.close();
+                    livePipSource = null;
+                }
+            };
+        }
+
+        function activateLivePiP() {
+            if (livePipOverlayEl) return;
+
+            const overlay = document.createElement("div");
+            overlay.className = "live-pip-overlay";
+            overlay.setAttribute("role", "dialog");
+            overlay.setAttribute("aria-label", "실시간 전사 PiP");
+
+            const header = document.createElement("div");
+            header.className = "pip-header";
+
+            const headerInfo = document.createElement("div");
+            headerInfo.className = "pip-header-info";
+
+            const liveDot = document.createElement("span");
+            liveDot.className = "pip-live-dot";
+
+            const title = document.createElement("span");
+            title.className = "pip-title";
+            title.textContent = "실시간 전사 스트림";
+
+            const closeBtn = document.createElement("button");
+            closeBtn.type = "button";
+            closeBtn.className = "pip-close-btn";
+            closeBtn.setAttribute("aria-label", "실시간 PiP 닫기");
+            closeBtn.textContent = "✕";
+            closeBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                deactivateLivePiP();
+            });
+
+            headerInfo.append(liveDot, title);
+            header.append(headerInfo, closeBtn);
+            header.addEventListener("mousedown", startLivePiPDrag);
+
+            const content = document.createElement("div");
+            content.className = "pip-content";
+            content.innerHTML = '<div class="pip-empty">실시간 전사를 불러오는 중...</div>';
+
+            overlay.append(header, content);
+            document.body.appendChild(overlay);
+
+            livePipOverlayEl = overlay;
+            livePipContentEl = content;
+
+            const initialLeft = Math.max(0, window.innerWidth - overlay.offsetWidth - LIVE_PIP_MARGIN);
+            const initialTop = Math.max(0, window.innerHeight - overlay.offsetHeight - LIVE_PIP_MARGIN);
+            overlay.style.left = `${initialLeft}px`;
+            overlay.style.top = `${initialTop}px`;
+
+            seedLivePiPHistory().finally(() => {
+                ensureLivePiPStream();
+            });
+        }
+
+        function deactivateLivePiP(options = {}) {
+            const { restoreLiveView = true } = options;
+
+            stopLivePiPDrag();
+
+            if (livePipSource) {
+                livePipSource.close();
+                livePipSource = null;
+            }
+
+            if (livePipOverlayEl) {
+                livePipOverlayEl.remove();
+                livePipOverlayEl = null;
+                livePipContentEl = null;
+            }
+
+            if (restoreLiveView && AppState.currentView === "history") {
+                returnToLiveSession();
+            }
+        }
 
         async function togglePip() {
             // Document PIP API 지원 여부 확인 (pywebview/WebView2에서는 미지원)
@@ -4210,11 +4642,17 @@
         async function togglePause() {
             try {
                 const res = await fetch("/toggle-pause", { method: "POST" });
-                if (!res.ok) return;
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ detail: "일시정지 전환 실패" }));
+                    throw new Error(err.detail || "일시정지 전환 실패");
+                }
                 const data = await res.json();
                 isPaused = data.paused;
                 updatePauseUI();
-            } catch (e) { /* 무시 */ }
+                showToast(isPaused ? "일시정지" : "녹음 재개", isPaused ? "warning" : "success");
+            } catch (e) {
+                showErrorToast(e, "일시정지 전환 중 오류가 발생했습니다");
+            }
         }
 
         function updatePauseUI() {
@@ -4351,9 +4789,14 @@
                 if (res.ok) {
                     if (sessionStatusEl) sessionStatusEl.textContent = "후처리 시작됨";
                     loadSessionList();
+                    showToast("새 세션이 시작되었습니다", "success");
+                } else {
+                    const err = await res.json().catch(() => ({ detail: "세션 저장 실패" }));
+                    throw new Error(err.detail || "세션 저장 실패");
                 }
             } catch (e) {
                 console.error("[세션 저장] 실패:", e);
+                showErrorToast(e, "세션 저장 실패");
             } finally {
                 btn.disabled = false;
                 btn.textContent = "저장";
@@ -4776,7 +5219,9 @@
             }
         };
 
-        function appendTranscript(item) {
+        function appendTranscript(item, options = {}) {
+            const { syncPiP = true } = options;
+
             // 빈 상태 제거
             if (emptyState) {
                 emptyState.remove();
@@ -4785,6 +5230,14 @@
             const code = String(item.speaker || "?").toUpperCase();
             const nextText = String(item.text || "").trim();
             const nextTs = String(item.ts || "--:--:--").trim() || "--:--:--";
+
+            const shouldMirrorPiP = syncPiP && Boolean(livePipOverlayEl);
+            if (shouldMirrorPiP) {
+                appendLivePiPSegment({ speaker: code, text: nextText, ts: nextTs });
+            }
+            if (AppState.currentView === "history" && shouldMirrorPiP) {
+                return;
+            }
 
             // 가상 스크롤 비활성 상태에서는 DOM에서 직접 lastChild 참조
             // 가상 스크롤 활성 상태에서는 renderedLines에서 마지막 요소 참조
@@ -4987,6 +5440,8 @@
 
         let reconnectAttempts = 0;
         let reconnectTimer = null;
+        let sseConnectedOnce = false;
+        let sseDisconnectToastShown = false;
         let _shutdownRequested = false;
         const MAX_RECONNECT_DELAY = 30000; // 30초
         const DISCONNECTED_THRESHOLD = 5;  // 이 횟수 이상 실패 시 "연결 끊김" 상태
@@ -5151,6 +5606,11 @@
                 if (reconnectAttempts > 0) {
                     syncMissedMessages();
                 }
+                if (sseConnectedOnce && reconnectAttempts > 0) {
+                    showToast("서버에 다시 연결되었습니다", "success");
+                }
+                sseConnectedOnce = true;
+                sseDisconnectToastShown = false;
                 setConnectionState("connected");
                 reconnectAttempts = 0;
                 // 스플래시 재시도 상태에서 로딩 중으로 복귀
@@ -5174,6 +5634,10 @@
                 if (_shutdownRequested) return;
                 // 과거 세션 조회 중이면 재연결하지 않음
                 if (AppState.currentView === "history") return;
+                if (sseConnectedOnce && !sseDisconnectToastShown) {
+                    showToast("서버 연결이 끊어졌습니다", "warning");
+                    sseDisconnectToastShown = true;
+                }
 
                 // 일정 횟수 이상 실패 시 "연결 끊김" 상태로 전환
                 if (reconnectAttempts >= DISCONNECTED_THRESHOLD) {
@@ -5569,7 +6033,10 @@
 
             try {
                 const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
-                if (!res.ok) throw new Error("세션 삭제 실패");
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ detail: "세션 삭제 실패" }));
+                    throw new Error(err.detail || "세션 삭제 실패");
+                }
 
                 // 현재 보고 있는 세션이 삭제된 경우 실시간으로 복귀
                 if (AppState.currentView === "history" && AppState.currentSessionId === sessionId) {
@@ -5580,6 +6047,7 @@
                 await loadSessionList();
             } catch (e) {
                 console.error("[사이드바] 세션 삭제 실패:", e.message);
+                showErrorToast(e, "세션 삭제 실패");
             }
         }
 

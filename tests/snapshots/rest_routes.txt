@@ -1,0 +1,39 @@
+# sonote REST 라우트 스냅샷
+# 생성일: 2026-03-16
+# 추출: src/server.py @app 데코레이터 분석
+
+GET     /
+GET     /settings
+GET     /api/settings
+POST    /api/settings
+GET     /api/audio-devices
+GET     /stream
+GET     /history
+GET     /status
+POST    /toggle-pause
+POST    /add-keyword
+POST    /remove-keyword
+GET     /keywords
+GET     /devices
+POST    /switch-device
+POST    /shutdown
+GET     /speakers
+POST    /enroll
+GET     /api/sessions
+GET     /api/sessions/{session_id}
+DELETE  /api/sessions/{session_id}
+GET     /api/sessions/{session_id}/search
+GET     /api/sessions/{session_id}/export
+POST    /api/push-segment
+POST    /api/load-transcript
+GET     /speaker-profile
+GET     /api/profiles
+POST    /api/profiles
+PUT     /api/profiles/{name}
+DELETE  /api/profiles/{name}
+GET     /api/speakers/unknown
+POST    /api/speakers/auto-register
+DELETE  /api/speakers/unknown/{speaker_id}
+POST    /api/sessions/new
+
+WS      /ws/transcribe

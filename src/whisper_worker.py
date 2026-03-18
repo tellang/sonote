@@ -152,7 +152,7 @@ def _worker_loop(
         model = WhisperModel(model_id, device=device, compute_type=compute_type)
     except Exception as exc:
         out_q.put({"type": "error", "error": f"모델 로드 실패: {exc}"})
-        os._exit(1)
+        raise SystemExit(1)
 
     out_q.put({"type": "ready"})  # 모델 로드 완료 신호
 
@@ -197,9 +197,9 @@ def _worker_loop(
     except KeyboardInterrupt:
         pass
 
-    # 워커 종료 - CUDA 크래시해도 메인에 영향 없음
-    # os._exit(0)으로 즉시 종료 (C++ 소멸자 호출 방지)
-    os._exit(0)
+    # 워커 종료는 우선 graceful return을 사용한다.
+    # 종료 지연/교착은 부모 stop()에서 terminate()로 회수한다.
+    return
 
 
 class WhisperWorker:
@@ -207,7 +207,7 @@ class WhisperWorker:
 
     def __init__(
         self,
-        model_id: str = "large-v3-turbo",
+        model_id: str = "tellang/whisper-large-v3-turbo-ko",
         language: str = "ko",
         device: str = "cuda",
         compute_type: str = "float16",
@@ -334,7 +334,7 @@ class WhisperWorkerPool:
 
     def __init__(
         self,
-        model_id: str = "large-v3-turbo",
+        model_id: str = "tellang/whisper-large-v3-turbo-ko",
         language: str = "ko",
         device: str = "cuda",
         compute_type: str = "float16",

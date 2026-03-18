@@ -15,10 +15,14 @@ output/
 .claude/*
 !.claude/commands/
 CLAUDE.md
+GEMINI.md
+AGENTS.md
+SKILL.md
 
-# 내부 운영 문서
+# 내부 운영 문서 — docs 기본 제외, 필요한 것만 허용
 prompts/
-docs/session-worklog*.md
+docs/*
+!docs/.gitkeep
 PROJECT_INDEX.md
 
 # 로컬 이슈 트래커

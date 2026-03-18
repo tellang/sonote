@@ -11,7 +11,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,7 @@ import numpy as np
 
 from src.db import save_profile, get_profile, list_profiles, update_captured, delete_profile
 from src.domain_keywords import DEFAULT_DOMAIN_HINT
+from .validate import sanitize_input, ValidationError
 from .cookies import (
     check_cookies_file,
     export_chrome_cookies_to_netscape,
@@ -308,6 +308,44 @@ def json_output(
     return _json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _filter_fields(data: dict[str, Any], fields: str | None) -> dict[str, Any]:
+    """--fields 옵션으로 지정된 필드만 추출한다. None이면 전체 반환."""
+    if not fields:
+        return data
+    keys = {k.strip() for k in fields.split(",") if k.strip()}
+    if not keys:
+        return data
+    return {k: v for k, v in data.items() if k in keys}
+
+
+def _validate_cli_inputs(args: argparse.Namespace) -> None:
+    """CLI 입력값에 대해 제어문자/위험 유니코드/경로 탈출을 검증한다."""
+    # URL 인수 검증
+    url = getattr(args, "url", None)
+    if url and isinstance(url, str):
+        sanitize_input(url, field="url")
+
+    # 오디오 파일 경로 검증
+    audio = getattr(args, "audio", None)
+    if audio and isinstance(audio, str):
+        sanitize_input(audio, field="audio")
+
+    # 출력 경로 검증
+    output = getattr(args, "output", None)
+    if output and isinstance(output, str):
+        sanitize_input(output, field="output")
+
+    # 화자 이름 검증 (enroll)
+    name = getattr(args, "name", None)
+    if name and isinstance(name, str):
+        sanitize_input(name, field="name")
+
+    # 프롬프트 검증 (meeting)
+    prompt = getattr(args, "prompt", None)
+    if prompt and isinstance(prompt, str):
+        sanitize_input(prompt, field="prompt")
+
+
 # --- 서브커맨드별 필수 외부 의존성 (schema 출력에 포함) ---
 _COMMAND_DEPENDENCIES: dict[str, list[dict[str, str]]] = {
     "desktop": [
@@ -481,6 +519,10 @@ def main():
         help="줄 단위 JSON 스트리밍 출력 (transcribe/meeting용)",
     )
     parser.add_argument(
+        "--fields", default=None,
+        help="출력 필드 선택 (쉼표 구분, --json과 함께 사용). 예: --fields text,start,end",
+    )
+    parser.add_argument(
         "--beta", action="store_true",
         help="베타 모드 활성화 (또는 SONOTE_BETA=1)",
     )
@@ -495,7 +537,7 @@ def main():
     p_trans = subparsers.add_parser("transcribe", help="로컬 오디오 파일 변환")
     p_trans.add_argument("audio", help="오디오 파일 경로 (WAV, MP3 등)")
     p_trans.add_argument("-o", "--output", help="출력 파일 경로 (기본: 입력파일_transcript.txt)")
-    p_trans.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델 (기본: large-v3-turbo)")
+    p_trans.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델 (기본: large-v3-turbo)")
     p_trans.add_argument("-l", "--language", default="ko", help="언어 코드 (기본: ko)")
     p_trans.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_trans.add_argument("--fmt", choices=["txt", "srt"], default="txt", help="출력 형식 (기본: txt)")
@@ -515,7 +557,7 @@ def main():
     p_live.add_argument("-o", "--output", help="출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)")
     p_live.add_argument("-b", "--back", type=int, default=0, help="N분 전부터 시작 (기본: 0=현재)")
     p_live.add_argument("-d", "--duration", type=int, default=50, help="녹음 시간(분) (기본: 50)")
-    p_live.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
+    p_live.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델")
     p_live.add_argument("-l", "--language", default="ko", help="언어 코드")
     p_live.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_live.add_argument(
@@ -575,7 +617,7 @@ def main():
     )
     p_smart.add_argument("url", help="YouTube URL")
     p_smart.add_argument("-o", "--output", default=None, help="출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)")
-    p_smart.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
+    p_smart.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델")
     p_smart.add_argument("-l", "--language", default="ko", help="언어 코드")
     p_smart.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_smart.add_argument(
@@ -697,6 +739,10 @@ def main():
   media-transcriber meeting --profiles output/data/speakers.json --auto-update
         """,
     )
+    p_meeting.add_argument(
+        "--file", metavar="PATH", default=None,
+        help="오프라인 모드: 오디오/비디오 파일 → 회의록 .md 변환 (마이크 대신 파일 입력)",
+    )
     p_meeting.add_argument("--no-diarize", action="store_true", help="화자 분리 비활성화")
     p_meeting.add_argument("--port", type=int, default=8000, help="SSE 서버 포트 (기본: 8000)")
     p_meeting.add_argument("-o", "--output", help="출력 파일 경로 (기본: output/meetings/YYYY-MM-DD/meeting_HHMMSS.md)")
@@ -705,7 +751,7 @@ def main():
     p_meeting.add_argument("--list-devices", action="store_true", help="사용 가능한 마이크 목록 출력")
     p_meeting.add_argument("--profiles", help="화자 프로필 JSON (enroll로 생성, 화자 분리 정확도 향상)")
     p_meeting.add_argument("--auto-update", action="store_true", help="회의 종료 시 승인 대기 프로필 스냅샷 생성")
-    p_meeting.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델 (기본: large-v3-turbo)")
+    p_meeting.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델 (기본: large-v3-turbo)")
     p_meeting.add_argument("-l", "--language", default="ko", help="언어 코드 (기본: ko)")
     p_meeting.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_meeting.add_argument(
@@ -781,6 +827,29 @@ def main():
         help="현재 실행 경로의 자동 시작 등록 상태 확인",
     )
 
+    # setup: 대화형/자동 환경 설정 + 의존성 설치
+    p_setup = subparsers.add_parser(
+        "setup",
+        help="환경 설정 — 의존성 자동 설치 + HF 토큰 설정",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+사용 예시:
+  sonote setup                # 핵심 의존성 설치 (ffmpeg, 모델 확인)
+  sonote setup --all          # 모든 선택적 의존성 설치
+  sonote setup --diarize      # 화자 분리 (torch + pyannote)
+  sonote setup --gpu          # CUDA 환경 설정
+  sonote setup --fix          # doctor 진단 후 누락 항목 자동 수정
+  sonote setup --hf-token hf_xxx  # HuggingFace 토큰 설정
+        """,
+    )
+    p_setup.add_argument("--all", action="store_true", dest="setup_all", help="모든 선택적 의존성 설치")
+    p_setup.add_argument("--gpu", action="store_true", help="CUDA 환경 설정")
+    p_setup.add_argument("--diarize", action="store_true", help="화자 분리 의존성 설치")
+    p_setup.add_argument("--desktop", action="store_true", help="데스크톱 extras 설치")
+    p_setup.add_argument("--fix", action="store_true", help="doctor 진단 후 누락 항목 자동 수정")
+    p_setup.add_argument("--hf-token", default=None, help="HuggingFace 토큰 설정")
+    p_setup.add_argument("--json", action="store_true", dest="setup_json", help="JSON 형식 출력")
+
     # doctor: 종합 환경 진단 (설치 안내 포함)
     p_doctor = subparsers.add_parser(
         "doctor",
@@ -831,7 +900,7 @@ def main():
     _p_smart_old = subparsers.add_parser("smart", help="[deprecated] auto를 사용하세요")
     _p_smart_old.add_argument("url", help="YouTube URL")
     _p_smart_old.add_argument("-o", "--output", default=None, help="출력 디렉토리")
-    _p_smart_old.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
+    _p_smart_old.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델")
     _p_smart_old.add_argument("-l", "--language", default="ko", help="언어 코드")
     _p_smart_old.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     _p_smart_old.add_argument(
@@ -872,6 +941,21 @@ def main():
     is_json = getattr(args, "json_mode", False)
     is_ndjson = getattr(args, "ndjson_mode", False)
 
+    # 입력 검증 — 제어문자, 위험 유니코드, 경로 탈출 차단
+    try:
+        _validate_cli_inputs(args)
+    except ValidationError as ve:
+        if is_json:
+            print(json_output(
+                "error", args.command,
+                error=str(ve),
+                code="ARG_ERROR",
+                data={"field": ve.field, "validation_code": ve.code},
+            ))
+        else:
+            print(f"[입력 검증 실패] {ve}", file=sys.stderr)
+        sys.exit(EXIT_ARG_ERROR)
+
     # schema 커맨드: 서브커맨드 스키마 자동 출력 + capabilities
     if args.command == "schema":
         _cmd_schema(subparsers, args)
@@ -885,6 +969,20 @@ def main():
     # autostart 커맨드: Windows 자동 시작 제어
     if args.command == "autostart":
         _cmd_autostart(args)
+        return
+
+    # setup 커맨드: 환경 설정 + 의존성 설치
+    if args.command == "setup":
+        from .setup import run_setup
+        run_setup(
+            all_extras=getattr(args, "setup_all", False),
+            gpu=getattr(args, "gpu", False),
+            diarize=getattr(args, "diarize", False),
+            desktop=getattr(args, "desktop", False),
+            fix=getattr(args, "fix", False),
+            hf_token=getattr(args, "hf_token", None),
+            use_json=getattr(args, "setup_json", False),
+        )
         return
 
     # doctor 커맨드: 종합 환경 진단
@@ -1106,7 +1204,7 @@ def _cmd_dry_run(args: argparse.Namespace) -> None:
 
     config: dict[str, Any] = {
         "command": args.command,
-        "model": getattr(args, "model", "large-v3-turbo"),
+        "model": getattr(args, "model", "tellang/whisper-large-v3-turbo-ko"),
         "language": getattr(args, "language", "ko"),
         "device": device,
         "compute_type": compute_type,
@@ -1165,37 +1263,24 @@ def _cmd_transcribe(args):
     if is_ndjson:
         print(_ndjson_line("start", command="transcribe", audio=str(audio_path)))
 
-    if args.chunk_minutes > 0:
-        segments = transcribe_chunks(
-            audio_path,
-            chunk_minutes=args.chunk_minutes,
-            model_id=args.model,
-            language=args.language,
-            device=device,
-            compute_type=compute_type,
-            beam_size=args.beam,
-        )
-    else:
-        segments = transcribe_audio(
-            audio_path,
-            model_id=args.model,
-            language=args.language,
-            device=device,
-            compute_type=compute_type,
-            beam_size=args.beam,
-        )
-
-    # NDJSON: 세그먼트별 줄 단위 출력
-    if is_ndjson:
-        for seg in segments:
-            print(_ndjson_line(
-                "segment",
-                start=seg.get("start", 0.0),
-                end=seg.get("end", 0.0),
-                text=(seg.get("text") or "").strip(),
-            ))
-
+    # CUDA 크래시 전에 즉시 저장
     save_transcript(segments, output_path, fmt=args.fmt)
+
+    # NDJSON: 세그먼트별 줄 단위 출력 (--fields 적용)
+    if is_ndjson:
+        _fields_set = None
+        _raw_fields = getattr(args, "fields", None)
+        if _raw_fields:
+            _fields_set = {k.strip() for k in _raw_fields.split(",") if k.strip()}
+        for seg in segments:
+            _seg_data = {
+                "start": seg.get("start", 0.0),
+                "end": seg.get("end", 0.0),
+                "text": (seg.get("text") or "").strip(),
+            }
+            if _fields_set:
+                _seg_data = {k: v for k, v in _seg_data.items() if k in _fields_set}
+            print(_ndjson_line("segment", **_seg_data))
 
     if is_ndjson:
         print(_ndjson_line(
@@ -1206,12 +1291,15 @@ def _cmd_transcribe(args):
             segments=len(segments),
         ))
     elif getattr(args, "json_mode", False):
-        print(json_output("success", "transcribe", data={
+        _tdata = {
             "audio": str(audio_path),
             "output": str(output_path),
             "segments": len(segments),
             "format": args.fmt,
-        }))
+        }
+        print(json_output("success", "transcribe", data=_filter_fields(
+            _tdata, getattr(args, "fields", None),
+        )))
 
 
 def _cmd_probe(args):
@@ -1938,8 +2026,151 @@ def _collect_live_corrections(
 
     return corrected_map
 
+def _cmd_meeting_offline(args):
+    """오프라인 회의록 변환 — 파일 → Whisper 전사 → MeetingWriter(.md) → 후처리."""
+    from .transcribe import transcribe_audio, transcribe_chunks, get_audio_duration
+    from .meeting_writer import MeetingWriter
+
+    audio_path = Path(args.file)
+    if not audio_path.exists():
+        print(f"[오류] 파일을 찾을 수 없습니다: {audio_path}", file=sys.stderr)
+        sys.exit(EXIT_NOT_FOUND)
+
+    is_json = getattr(args, "json_mode", False)
+    is_ndjson = getattr(args, "ndjson_mode", False)
+
+    print(f"[오프라인 회의록] {audio_path}", file=sys.stderr)
+    print(f"[모드] 파일 → 회의록 .md 변환", file=sys.stderr)
+
+    # 디바이스 설정
+    device_name = "cpu" if args.cpu else None
+    compute_type = "int8" if args.cpu else None
+
+    # 오디오 길이 확인 → 청크 분할 결정
+    try:
+        duration_seconds = get_audio_duration(str(audio_path))
+        duration_minutes = duration_seconds / 60
+        print(f"[오디오] {duration_minutes:.1f}분", file=sys.stderr)
+    except Exception:
+        duration_seconds = 0.0
+        duration_minutes = 0.0
+
+    # 10분 이상이면 자동 청크 분할
+    chunk_minutes = 10 if duration_minutes > 10 else 0
+
+    # 전사 실행
+    print(f"[전사] 모델: {args.model} | 청크: {chunk_minutes}분", file=sys.stderr)
+    if chunk_minutes > 0:
+        segments = transcribe_chunks(
+            audio_path,
+            chunk_minutes=chunk_minutes,
+            model_id=args.model,
+            language=args.language,
+            device=device_name,
+            compute_type=compute_type,
+            beam_size=getattr(args, "beam", 5),
+        )
+    else:
+        segments = transcribe_audio(
+            audio_path,
+            model_id=args.model,
+            language=args.language,
+            device=device_name,
+            compute_type=compute_type,
+            beam_size=getattr(args, "beam", 5),
+        )
+
+    if not segments:
+        print("[오류] 전사 결과가 비어 있습니다.", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+
+    # MeetingWriter로 회의록 양식 생성
+    writer = MeetingWriter(output_path=args.output)
+
+    for seg in segments:
+        start_sec = seg.get("start", 0.0)
+        end_sec = seg.get("end", 0.0)
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+
+        # 타임스탬프 포맷
+        start_ts = time.strftime("%H:%M:%S", time.gmtime(start_sec))
+        end_ts = time.strftime("%H:%M:%S", time.gmtime(end_sec))
+        timestamp = f"{start_ts} ~ {end_ts}"
+
+        writer.append_segment(
+            speaker="Unknown",
+            text=text,
+            timestamp=timestamp,
+            metadata={"start": start_sec, "end": end_sec},
+        )
+
+    # 종료 처리
+    segment_count = len([s for s in segments if (s.get("text") or "").strip()])
+    duration_str = time.strftime("%H:%M:%S", time.gmtime(duration_seconds))
+    speaker_count = len(writer._speakers)
+
+    writer.write_footer(duration_str, segment_count, speaker_count)
+    writer.close()
+
+    print(f"\n[완료] {writer.output_path}", file=sys.stderr)
+    print(f"[통계] {segment_count}개 세그먼트 | {duration_str} | {speaker_count}명", file=sys.stderr)
+
+    # LLM 후처리 (meeting과 동일)
+    _use_ollama = getattr(args, "ollama", False)
+    _ollama_model = getattr(args, "ollama_model", "gemma3:27b")
+
+    if not getattr(args, "no_polish", False) and segment_count > 0:
+        from .polish import is_codex_available, is_gemini_available, is_ollama_available
+
+        if is_codex_available() or is_gemini_available() or is_ollama_available(_ollama_model):
+            import multiprocessing
+
+            print(file=sys.stderr)
+            print("=" * 60, file=sys.stderr)
+            print("[후처리] LLM 후처리 (STT 교정 + 요약)", file=sys.stderr)
+            print("=" * 60, file=sys.stderr)
+
+            try:
+                _status_file = str(writer.output_path.with_suffix(".postprocess-status.json"))
+                proc = multiprocessing.Process(
+                    target=_run_async_polish_process,
+                    args=(
+                        str(writer.output_path),
+                        segment_count,
+                        _use_ollama,
+                        _ollama_model,
+                        _status_file,
+                    ),
+                    daemon=False,
+                )
+                proc.start()
+                print(f"[후처리] 백그라운드 실행 중 (PID: {proc.pid})", file=sys.stderr)
+                print("[후처리] 터미널을 닫아도 후처리는 계속됩니다.", file=sys.stderr)
+            except Exception as e:
+                print(f"[후처리] 실패: {e}", file=sys.stderr)
+        else:
+            print("[후처리] Codex/Gemini/Ollama 미가용 — 후처리 건너뜀", file=sys.stderr)
+
+    if is_json:
+        print(json_output("success", "meeting", data={
+            "mode": "offline",
+            "audio": str(audio_path),
+            "output": str(writer.output_path),
+            "segments": segment_count,
+            "duration": duration_str,
+        }))
+
+
 def _cmd_meeting(args):
-    """회의 실시간 전사 — 마이크 → STT → 화자 분리 → SSE + 파일."""
+    """회의 전사 — 마이크(실시간) 또는 파일(오프라인) → 회의록 .md."""
+
+    # --file: 오프라인 모드 — 파일 → 회의록 .md 변환
+    if getattr(args, "file", None):
+        _cmd_meeting_offline(args)
+        return
+
     from .audio_capture import list_audio_devices, capture_audio, find_builtin_mic
 
     # --list-devices: 장치 목록만 출력
@@ -1969,6 +2200,7 @@ def _cmd_meeting(args):
     from .server import (
         run_server,
         push_transcript_sync,
+        push_correction_sync,
         is_paused,
         is_shutdown_requested,
         get_keywords,
@@ -1982,18 +2214,10 @@ def _cmd_meeting(args):
         consume_session_rotate,
         set_session_rotate_callback,
     )
-    from .postprocess import (
-        Segment,
-        postprocess,
-        is_valid_segment,
-        is_hallucination,
-        is_looping,
-        normalize_feedback_text,
-        remove_overlap,
-    )
+    from .meeting import PipelineAdapter, PipelineContext, run_capture_loop
     from .meeting_writer import MeetingWriter
     from .tray import MeetingTray, is_available as tray_available
-    from .whisper_worker import WhisperWorker
+    from .whisper_worker import WhisperWorkerPool
 
     # SSE 서버 시작 (데몬 스레드)
     set_current_audio_device(args.device)
@@ -2031,11 +2255,12 @@ def _cmd_meeting(args):
     # Whisper 워커 프로세스 시작 (비동기 — 캡처와 병렬 로드)
     set_startup_status("loading_asr", f"STT 모델 로드 중 ({device}/{compute_type})...")
     print(f"[모델] {args.model} 로드 중 ({device}/{compute_type})...", file=sys.stderr)
-    worker = WhisperWorker(
+    worker = WhisperWorkerPool(
         model_id=args.model,
         language=args.language,
         device=device,
         compute_type=compute_type,
+        n_workers=1,
     )
     worker.start()  # 논블로킹: 모델 로드 완료를 기다리지 않음
     # AGC (볼륨 자동 보정) — 마이크 거리 차이 보정
@@ -2147,17 +2372,12 @@ def _cmd_meeting(args):
 
     start_time = time.time()
     segment_count = 0
-    _diarize_warned = False  # 화자 분리 실패 최초 경고용
     # 이전 전사 결과를 rolling context로 유지 (최대 800자)
     rolling_context = _build_meeting_prompt(_build_dynamic_domain_hint(), args.prompt)
-    prev_chunk_text = ""  # 청크 경계 중복 제거용
-    recent_texts: deque[str] = deque(maxlen=10)  # 크로스-청크 반복 방지
 
     # 실시간 후처리 초기화 (녹음 중 백그라운드 교정 + 키워드 추출)
     _polish_pool = None
     _correction_futures: list[tuple] = []
-    _uncorrected_buffer: list[str] = []
-    _keyword_extract_at: int = 0
     _use_ollama = getattr(args, "ollama", False)
     _ollama_model = getattr(args, "ollama_model", None) or "gemma3:27b"
     _correct_fn = None
@@ -2197,354 +2417,264 @@ def _cmd_meeting(args):
     _capture_switch_event = get_audio_device_switch_event()
     _active_input_device = args.device
     _fallback_input_device = args.device
-    _no_switch_requested = object()
+    _shutdown_logged = False
+    chunk_offset_seconds = 0.0
+    heuristic_min = max(4.0, min(args.chunk * 0.55, args.chunk - 1.0))
 
-    try:
-        heuristic_min = max(4.0, min(args.chunk * 0.55, args.chunk - 1.0))
-        while True:
-            requested_input_device = _no_switch_requested
+    def _rotate_session() -> None:
+        nonlocal writer, segment_count, start_time, rolling_context
+        nonlocal pending_profiles_path, audio_offset_seconds, chunk_offset_seconds
+
+        _save_current_session()
+        writer.close()
+
+        writer = MeetingWriter(output_path=args.output)
+        writer.write_header()
+        print(f"\n[새 세션] {writer.output_path}", file=sys.stderr)
+
+        segment_count = 0
+        start_time = time.time()
+        rolling_context = _build_meeting_prompt(_build_dynamic_domain_hint(), args.prompt)
+        audio_offset_seconds = 0.0
+        chunk_offset_seconds = 0.0
+        _audio_prefetch_buffer.clear()
+
+        set_session_rotate_callback(_save_current_session)
+        pending_profiles_path = writer.output_path.with_suffix(".profiles.pending.json")
+        print("[새 세션] 녹음 계속 중 (모델 유지)", file=sys.stderr)
+
+    def _is_shutdown_requested() -> bool:
+        nonlocal _shutdown_logged
+        requested = is_shutdown_requested()
+        if requested and not _shutdown_logged:
+            print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
+            _shutdown_logged = True
+        return requested
+
+    def _preprocess_chunk(chunk: np.ndarray) -> np.ndarray | None:
+        nonlocal audio_offset_seconds, chunk_offset_seconds, _model_announced
+
+        chunk = agc.process(chunk)
+        chunk_duration_seconds = len(chunk) / 16000.0
+        chunk_offset_seconds = audio_offset_seconds
+        audio_offset_seconds += chunk_duration_seconds
+        writer.append_audio(chunk)
+
+        if not worker.is_ready:
+            _audio_prefetch_buffer.append(chunk)
+            set_startup_status(
+                "loading_asr",
+                f"모델 로드 중… (오디오 {len(_audio_prefetch_buffer)}청크 버퍼링)",
+            )
+            return None
+
+        if not _model_announced:
+            print("[모델] 로드 완료", file=sys.stderr)
+            _model_announced = True
+            set_startup_status("ready", "녹음 준비 완료", ready=True)
+
+        if _audio_prefetch_buffer:
+            buffered_count = len(_audio_prefetch_buffer)
+            print(
+                f"[선캡처] 버퍼된 {buffered_count}청크를 현재 청크에 병합",
+                file=sys.stderr,
+            )
+            _audio_prefetch_buffer.append(chunk)
+            chunk = np.concatenate(_audio_prefetch_buffer)
+            _audio_prefetch_buffer.clear()
+
+        return chunk
+
+    def _timestamp_provider() -> str:
+        elapsed = time.time() - start_time
+        return time.strftime("%H:%M:%S", time.gmtime(elapsed))
+
+    def _transcribe_kwargs_factory(_chunk: np.ndarray) -> dict[str, Any]:
+        nonlocal rolling_context
+        rolling_context = _build_meeting_prompt(_build_dynamic_domain_hint(), rolling_context)
+        return {
+            "temperature": 0.0,
+            "initial_prompt": rolling_context,
+        }
+
+    def _transcribe_runner(
+        stt_worker: Any,
+        chunk: np.ndarray,
+        kwargs: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        stt_segments = stt_worker.transcribe(chunk, **kwargs)
+        return _run_selective_bon(
+            stt_worker,
+            chunk,
+            args,
+            rolling_context,
+            _build_dynamic_domain_hint(),
+            stt_segments,
+        )
+
+    def _segment_time_mapper(seg: dict[str, Any]) -> tuple[float, float]:
+        return (
+            chunk_offset_seconds + float(seg.get("start", 0.0)),
+            chunk_offset_seconds + float(seg.get("end", 0.0)),
+        )
+
+    def _on_raw_segment(payload: dict[str, Any]) -> None:
+        alignment_payload = dict(payload)
+        alignment_payload["chunk_offset"] = chunk_offset_seconds
+        writer.append_alignment(alignment_payload)
+
+    def _on_transcript(payload: dict[str, Any]) -> None:
+        push_transcript_sync(payload["speaker"], payload["text"], payload["timestamp"])
+        writer.append_segment(
+            payload["speaker"],
+            payload["text"],
+            payload["timestamp"],
+            metadata={
+                "start": payload["start"],
+                "end": payload["end"],
+                "feedback_text": payload["feedback_text"],
+            },
+        )
+        print(f"[{payload['timestamp']}] [{payload['speaker']}] {payload['text']}")
+
+    def _on_segment_emitted(
+        _segment: Any,
+        timestamp: str,
+        _stripped: str,
+        emitted_count: int,
+    ) -> None:
+        nonlocal segment_count
+        segment_count = emitted_count
+        if tray:
+            speaker_count = diarizer.get_speaker_count() if diarizer else 1
+            tray.update_status(
+                elapsed=timestamp,
+                segments=segment_count,
+                speakers=speaker_count,
+                paused=is_paused(),
+            )
+
+    def _on_chunk_processed(_segments: list[Any], chunk_text: str, _count: int) -> None:
+        nonlocal rolling_context
+        rolling_context = _build_meeting_prompt(
+            _build_dynamic_domain_hint(),
+            rolling_context + " " + chunk_text,
+        )
+
+    def _submit_correction(batch: list[str], idx: int) -> Any:
+        if _polish_pool is None or _correct_fn is None:
+            return None
+        return _polish_pool.submit(_correct_fn, batch, idx, 120)
+
+    def _submit_keyword(text: str) -> None:
+        if _polish_pool is None or _extract_kw_fn is None:
+            return
+
+        def _do_kw_extract(_text: str = text, _fn: Any = _extract_kw_fn) -> None:
             try:
-                for chunk in capture_audio(
-                    chunk_seconds=args.chunk,
-                    device=_active_input_device,
-                    heuristic_split=not getattr(args, "fixed_chunking", False),
-                    min_chunk_seconds=heuristic_min,
-                    stop_event=_capture_switch_event,
-                    on_stream_started=lambda d=_active_input_device: set_current_audio_device(d),
-                ):
-                    has_switch, next_device = consume_audio_device_switch()
-                    if has_switch and next_device != _active_input_device:
-                        requested_input_device = next_device
-                        break
-                    if has_switch:
-                        set_current_audio_device(_active_input_device)
-
-                    # 세션 회전 체크 (shutdown 체크 전에)
-                    if consume_session_rotate():
-                        # 이전 세션 저장 (CLI 스레드에서 안전하게 실행)
-                        _save_current_session()
-                        writer.close()
-
-                        # MeetingWriter 교체 (새 세션 디렉토리)
-                        writer = MeetingWriter(output_path=args.output)
-                        writer.write_header()
-                        print(f"\n[새 세션] {writer.output_path}", file=sys.stderr)
-
-                        # 상태 리셋
-                        segment_count = 0
-                        start_time = time.time()
-                        rolling_context = _build_meeting_prompt(_build_dynamic_domain_hint(), args.prompt)
-                        prev_chunk_text = ""
-                        recent_texts.clear()
-                        _uncorrected_buffer.clear()
-                        _keyword_extract_at = 0
-                        audio_offset_seconds = 0.0
-
-                        # 콜백 재등록 (새 writer 참조)
-                        set_session_rotate_callback(_save_current_session)
-
-                        # pending_profiles 경로 갱신
-                        pending_profiles_path = writer.output_path.with_suffix(".profiles.pending.json")
-
-                        print("[새 세션] 녹음 계속 중 (모델 유지)", file=sys.stderr)
-                        continue
-
-                    # 웹 UI에서 종료 요청 시 graceful shutdown
-                    if is_shutdown_requested():
-                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
-                        break
-
-                    # 일시정지 상태면 STT 건너뛰기 (캡처는 계속)
-                    if is_paused():
-                        continue
-
-                    # AGC 볼륨 보정
-                    chunk = agc.process(chunk)
-                    chunk_duration_seconds = len(chunk) / 16000.0
-                    chunk_offset_seconds = audio_offset_seconds
-                    audio_offset_seconds += chunk_duration_seconds
-                    writer.append_audio(chunk)
-
-                    # 모델 로드 미완료 시 오디오 버퍼링 (선캡처)
-                    if not worker.is_ready:
-                        _audio_prefetch_buffer.append(chunk)
-                        set_startup_status(
-                            "loading_asr",
-                            f"모델 로드 중… (오디오 {len(_audio_prefetch_buffer)}청크 버퍼링)",
-                        )
-                        continue
-
-                    # 모델 준비 완료 알림 (최초 1회)
-                    if not _model_announced:
-                        print("[모델] 로드 완료", file=sys.stderr)
-                        _model_announced = True
-                        set_startup_status("ready", "녹음 준비 완료", ready=True)
-
-                    # 선캡처 버퍼 소진: 현재 청크와 합쳐서 한 번에 전사
-                    if _audio_prefetch_buffer:
-                        _buf_count = len(_audio_prefetch_buffer)
-                        print(f"[선캡처] 버퍼된 {_buf_count}청크를 현재 청크에 병합", file=sys.stderr)
-                        _audio_prefetch_buffer.append(chunk)
-                        chunk = np.concatenate(_audio_prefetch_buffer)
-                        _audio_prefetch_buffer.clear()
-
-                    elapsed = time.time() - start_time
-                    ts = time.strftime("%H:%M:%S", time.gmtime(elapsed))
-
-                    # STT — rolling context로 이전 결과를 힌트로 제공
-                    # 매 청크마다 최신 키워드를 반영해 프롬프트를 재구성한다.
-                    rolling_context = _build_meeting_prompt(_build_dynamic_domain_hint(), rolling_context)
-                    stt_segments = worker.transcribe(
-                        chunk,
-                        language=args.language,
-                        beam_size=5,
-                        temperature=0.0,
-                        vad_filter=True,
-                        vad_parameters={
-                            "threshold": 0.45,
-                            "min_speech_duration_ms": 250,
-                            "min_silence_duration_ms": 500,
-                            "speech_pad_ms": 400,
-                        },
-                        hallucination_silence_threshold=2.0,
-                        compression_ratio_threshold=2.4,
-                        no_speech_threshold=0.45,
-                        log_prob_threshold=-1.0,
-                        initial_prompt=rolling_context,
-                        condition_on_previous_text=True,
-                        word_timestamps=True,
-                    )
-                    stt_segments = _run_selective_bon(
-                        worker,
-                        chunk,
-                        args,
-                        rolling_context,
-                        _build_dynamic_domain_hint(),
-                        stt_segments,
-                    )
-
-                    has_switch, next_device = consume_audio_device_switch()
-                    if has_switch and next_device != _active_input_device:
-                        requested_input_device = next_device
-                        break
-
-                    # STT 후 종료 재확인 (transcribe 블로킹 동안 요청됐을 수 있음)
-                    if is_shutdown_requested():
-                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
-                        break
-
-                    # 화자 분리: 청크 내 구간별 화자 감지 (세그먼테이션 기반)
-                    speaker_segments: list[dict] = []
-                    if diarizer:
-                        try:
-                            speaker_segments = diarizer.identify_speakers_in_chunk(chunk)
-                        except Exception as e:
-                            if not _diarize_warned:
-                                print(f"[화자 분리] 세그먼테이션 실패: {e}", file=sys.stderr)
-                                print("[화자 분리] 전체 청크 방식으로 폴백합니다.", file=sys.stderr)
-                                _diarize_warned = True
-
-                    # 화자 분리 후 종료 재확인
-                    if is_shutdown_requested():
-                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
-                        break
-
-                    raw_segments = []
-                    for seg in stt_segments:
-                        if not is_valid_segment(seg):
-                            continue
-
-                        raw_text = (seg["text"] or "").strip()
-                        if not raw_text:
-                            continue
-                        if is_hallucination(raw_text):
-                            continue
-                        if is_looping(raw_text):
-                            continue
-
-                        text = raw_text
-                        if prev_chunk_text:
-                            text = remove_overlap(prev_chunk_text, text)
-                            if not text:
-                                continue
-
-                        speaker = "화자"
-                        if speaker_segments:
-                            speaker = _match_speaker_segment(
-                                seg["start"], seg["end"], speaker_segments,
-                            )
-                        elif diarizer:
-                            try:
-                                speaker = diarizer.identify_speaker(chunk)
-                            except Exception:
-                                speaker = "?"
-
-                        absolute_start = chunk_offset_seconds + float(seg["start"])
-                        absolute_end = chunk_offset_seconds + float(seg["end"])
-                        feedback_text = normalize_feedback_text(text)
-                        writer.append_alignment(
-                            {
-                                "kind": "stt_segment",
-                                "timestamp": ts,
-                                "speaker": speaker,
-                                "raw_text": raw_text,
-                                "feedback_text": feedback_text,
-                                "start": absolute_start,
-                                "end": absolute_end,
-                                "chunk_offset": chunk_offset_seconds,
-                                "avg_logprob": seg.get("avg_logprob"),
-                                "no_speech_prob": seg.get("no_speech_prob"),
-                                "compression_ratio": seg.get("compression_ratio"),
-                                "words": seg.get("words") or [],
-                            }
-                        )
-                        raw_segments.append(Segment(
-                            speaker=speaker,
-                            text=text,
-                            start=absolute_start,
-                            end=absolute_end,
-                        ))
-
-                    if not raw_segments:
-                        continue
-
-                    # 후처리
-                    processed = postprocess(raw_segments)
-
-                    for p in processed:
-                        stripped = normalize_feedback_text(p.text)
-                        if stripped in recent_texts:
-                            continue
-                        recent_texts.append(stripped)
-
-                        segment_count += 1
-                        push_transcript_sync(p.speaker, p.text, ts)
-                        writer.append_segment(
-                            p.speaker,
-                            p.text,
-                            ts,
-                            metadata={
-                                "start": p.start,
-                                "end": p.end,
-                                "feedback_text": stripped,
-                            },
-                        )
-                        print(f"[{ts}] [{p.speaker}] {p.text}")
-                        if _polish_pool:
-                            _uncorrected_buffer.append(f"- [{ts}] [{p.speaker}] {p.text}")
-
-                    chunk_text = " ".join(normalize_feedback_text(p.text) for p in processed)
-                    prev_chunk_text = chunk_text
-                    rolling_context = _build_meeting_prompt(
-                        _build_dynamic_domain_hint(),
-                        rolling_context + " " + chunk_text,
-                    )
-
-                    # 실시간 STT 교정 (10세그먼트마다 배치 제출)
-                    if _polish_pool and _correct_fn and len(_uncorrected_buffer) >= 10:
-                        _batch = _uncorrected_buffer[:]
-                        _batch_start_idx = segment_count - len(_batch)
-                        _uncorrected_buffer.clear()
-                        _fut = _polish_pool.submit(
-                            _correct_fn, _batch, len(_correction_futures), 120,
-                        )
-
-                        def _on_correction_done(future, batch=_batch, start_idx=_batch_start_idx):
-                            try:
-                                _, ok, corrected = future.result(timeout=0)
-                                if ok:
-                                    corrections = []
-                                    for i, (orig, corr) in enumerate(zip(batch, corrected)):
-                                        if orig != corr:
-                                            corrections.append(
-                                                {
-                                                    "index": start_idx + i,
-                                                    "original": orig,
-                                                    "corrected": corr,
-                                                }
-                                            )
-                                    if corrections:
-                                        from .server import push_correction_sync
-
-                                        push_correction_sync(corrections)
-                            except Exception:
-                                pass
-
-                        _fut.add_done_callback(_on_correction_done)
-                        _correction_futures.append((_fut, _batch))
-
-                    # 실시간 도메인 키워드 추출 (10세그먼트마다)
-                    if _polish_pool and _extract_kw_fn and segment_count >= _keyword_extract_at + 10:
-                        _keyword_extract_at = segment_count
-                        _kw_text = " ".join(list(recent_texts)[-10:])
-                        if _kw_text.strip():
-                            def _do_kw_extract(_text=_kw_text, _fn=_extract_kw_fn):
-                                try:
-                                    kws = _fn(_text)
-                                    payload = add_extracted_keywords(list(kws or []))
-                                    promoted = payload.get("promoted") or []
-                                    extracted = payload.get("extracted") or []
-                                    if kws:
-                                        print(
-                                            f"[키워드 추출] promoted={len(promoted)} extracted={len(extracted)}",
-                                            file=sys.stderr,
-                                        )
-                                except Exception as e:
-                                    print(f"[키워드 추출] 실패: {e}", file=sys.stderr)
-
-                            _polish_pool.submit(_do_kw_extract)
-
-                    # 트레이 아이콘 상태 갱신
-                    if tray:
-                        speaker_count = diarizer.get_speaker_count() if diarizer else 1
-                        tray.update_status(
-                            elapsed=ts,
-                            segments=segment_count,
-                            speakers=speaker_count,
-                            paused=is_paused(),
-                        )
-                if requested_input_device is _no_switch_requested:
-                    has_switch, next_device = consume_audio_device_switch()
-                    if has_switch and next_device != _active_input_device:
-                        requested_input_device = next_device
-                    elif has_switch:
-                        set_current_audio_device(_active_input_device)
-            except Exception as e:
-                if _active_input_device != _fallback_input_device:
+                kws = _fn(_text)
+                payload = add_extracted_keywords(list(kws or []))
+                promoted = payload.get("promoted") or []
+                extracted = payload.get("extracted") or []
+                if kws:
                     print(
-                        "[마이크] 장치 전환 실패:"
-                        f" {_format_input_device(_active_input_device)} ({e})",
+                        f"[키워드 추출] promoted={len(promoted)} extracted={len(extracted)}",
                         file=sys.stderr,
                     )
-                    print(
-                        "[마이크] 이전 장치로 복귀:"
-                        f" {_format_input_device(_fallback_input_device)}",
-                        file=sys.stderr,
-                    )
-                    _active_input_device = _fallback_input_device
-                    set_current_audio_device(
-                        _fallback_input_device,
-                        error=f"전환 실패: {e}",
-                    )
-                    continue
-                raise
+            except Exception as exc:
+                print(f"[키워드 추출] 실패: {exc}", file=sys.stderr)
 
-            if is_shutdown_requested():
-                break
+        _polish_pool.submit(_do_kw_extract)
 
-            if requested_input_device is not _no_switch_requested:
-                print(
-                    "[마이크] 입력 장치 전환:"
-                    f" {_format_input_device(_active_input_device)}"
-                    f" -> {_format_input_device(requested_input_device)}",
-                    file=sys.stderr,
-                )
-                _fallback_input_device = _active_input_device
-                _active_input_device = requested_input_device
-                continue
+    def _on_correction_future(future: Any, batch: list[str]) -> None:
+        _correction_futures.append((future, batch))
 
-            break
+    def _on_capture_error(
+        exc: Exception,
+        active_device: int | None,
+        _error_count: int,
+    ) -> tuple[int | None, bool]:
+        nonlocal _active_input_device
 
+        if active_device != _fallback_input_device:
+            print(
+                "[마이크] 장치 전환 실패:"
+                f" {_format_input_device(active_device)} ({exc})",
+                file=sys.stderr,
+            )
+            print(
+                "[마이크] 이전 장치로 복귀:"
+                f" {_format_input_device(_fallback_input_device)}",
+                file=sys.stderr,
+            )
+            _active_input_device = _fallback_input_device
+            set_current_audio_device(
+                _fallback_input_device,
+                error=f"전환 실패: {exc}",
+            )
+            return _fallback_input_device, True
+        raise exc
+
+    def _on_device_switched(previous: int | None, current: int | None) -> None:
+        nonlocal _active_input_device, _fallback_input_device
+
+        print(
+            "[마이크] 입력 장치 전환:"
+            f" {_format_input_device(previous)} -> {_format_input_device(current)}",
+            file=sys.stderr,
+        )
+        _fallback_input_device = previous
+        _active_input_device = current
+
+    context = PipelineContext(
+        worker=worker,
+        diarizer=diarizer,
+        language=args.language,
+        chunk_seconds=args.chunk,
+        on_transcript=_on_transcript,
+        on_correction=push_correction_sync,
+        stop_event=threading.Event(),
+    )
+    adapter = PipelineAdapter(
+        capture_audio=capture_audio,
+        is_paused=is_paused,
+        is_shutdown_requested=_is_shutdown_requested,
+        consume_audio_device_switch=consume_audio_device_switch,
+        set_current_audio_device=set_current_audio_device,
+        capture_stop_event=_capture_switch_event,
+        capture_kwargs={
+            "heuristic_split": not getattr(args, "fixed_chunking", False),
+            "min_chunk_seconds": heuristic_min,
+        },
+        consume_session_rotate=consume_session_rotate,
+        on_session_rotate=_rotate_session,
+        skip_chunk_on_rotate=True,
+        reset_runtime_on_rotate=True,
+        preprocess_chunk=_preprocess_chunk,
+        transcribe_kwargs_factory=_transcribe_kwargs_factory,
+        transcribe_runner=_transcribe_runner,
+        timestamp_provider=_timestamp_provider,
+        segment_time_mapper=_segment_time_mapper,
+        on_raw_segment=_on_raw_segment,
+        on_segment_emitted=_on_segment_emitted,
+        on_chunk_processed=_on_chunk_processed,
+        dedupe_recent_texts=True,
+        recent_text_limit=10,
+        submit_correction_batch=_submit_correction,
+        on_correction_future=_on_correction_future,
+        submit_keyword_job=_submit_keyword,
+        keyword_every_segments=10,
+        keyword_window=10,
+        on_capture_error=_on_capture_error,
+        on_device_switched=_on_device_switched,
+        diarize_error_label="meeting",
+    )
+    try:
+        run_capture_loop(
+            context,
+            adapter,
+            initial_device=_active_input_device,
+        )
     except KeyboardInterrupt:
         pass
 

@@ -77,7 +77,7 @@ def disable_cuda_exit_guard() -> None:
     _cuda_exit_enabled = False
 def transcribe_audio(
     audio_path: str | Path,
-    model_id: str = "large-v3-turbo",
+    model_id: str = "tellang/whisper-large-v3-turbo-ko",
     language: str = "ko",
     device: str | None = None,
     compute_type: str | None = None,
@@ -150,6 +150,12 @@ def transcribe_audio(
         })
 
     print(f"[완료] {len(results)}개 세그먼트")
+
+    # CUDA 모델 명시 해제 — GC에 의한 segfault 방지
+    del model
+    import gc
+    gc.collect()
+
     return results
 
 
@@ -211,7 +217,7 @@ def split_audio(
 def transcribe_chunks(
     audio_path: str | Path,
     chunk_minutes: int = 10,
-    model_id: str = "large-v3-turbo",
+    model_id: str = "tellang/whisper-large-v3-turbo-ko",
     language: str = "ko",
     device: str | None = None,
     compute_type: str | None = None,

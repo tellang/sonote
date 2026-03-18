@@ -435,6 +435,7 @@ class TestDeleteSession:
 
         response = await client.delete("/api/sessions/2026-03-13_999999")
         assert response.status_code == 404
+        assert response.json()["detail"] == "이 세션에는 저장된 데이터가 없습니다."
 
     @pytest.mark.asyncio
     async def test_returns_400_for_invalid_id_format(self, client):

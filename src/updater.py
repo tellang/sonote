@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from .runtime.context import is_frozen
+
 __all__ = [
     "UpdateInfo",
     "UpdateError",
@@ -391,7 +393,7 @@ def apply_update(new_exe_path: Path) -> None:
         UpdateError: EXE 탐지 실패 또는 교체 오류.
     """
     # 현재 실행 파일 경로 탐지
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         # PyInstaller 환경
         current_exe = Path(sys.executable)
     else:

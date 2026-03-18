@@ -1,9 +1,15 @@
 """공통 테스트 fixture 정의."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from src import server
 from src.postprocess import Segment
+
+# 스냅샷 디렉토리 경로
+SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
 
 @pytest.fixture(autouse=True)
@@ -43,3 +49,32 @@ def sample_segments():
         Segment(speaker="A", text="파이선 프로젝트 시작합니다", start=1.5, end=3.0),
         Segment(speaker="B", text="네 알겠습니다", start=4.0, end=5.0),
     ]
+
+
+@pytest.fixture
+def snapshot_cli_commands():
+    """CLI 명령 surface 스냅샷 텍스트를 반환한다."""
+    path = SNAPSHOTS_DIR / "cli_commands.txt"
+    assert path.exists(), f"CLI 스냅샷 파일이 없습니다: {path}"
+    return path.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def snapshot_rest_routes():
+    """REST 라우트 스냅샷 라인 목록을 반환한다."""
+    path = SNAPSHOTS_DIR / "rest_routes.txt"
+    assert path.exists(), f"REST 라우트 스냅샷 파일이 없습니다: {path}"
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    return lines
+
+
+@pytest.fixture
+def snapshot_ws_messages():
+    """WebSocket 메시지 타입 스냅샷 텍스트를 반환한다."""
+    path = SNAPSHOTS_DIR / "ws_messages.txt"
+    assert path.exists(), f"WS 메시지 스냅샷 파일이 없습니다: {path}"
+    return path.read_text(encoding="utf-8")

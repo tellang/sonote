@@ -49,6 +49,86 @@ MIN_SEGMENT_DURATION = 0.5     # 임베딩 추출 최소 구간 (초)
 SPEECH_THRESHOLD = 0.5         # 음성 감지 확률 임계값
 PROFILE_VERSION = 2            # 프로필 파일 포맷 버전
 
+# --- 한국어 최적화 (SONOTE_BETA=1에서만 활성) ---
+KOREAN_SPEECH_THRESHOLD = 0.4
+KOREAN_MIN_SEGMENT_DURATION = 0.3
+KOREAN_BASE_THRESHOLD = 0.60
+KOREAN_EMA_ALPHA = 0.15
+KOREAN_BACKCHANNEL_MAX_DURATION = 0.3
+
+
+def _is_korean_beta_mode() -> bool:
+    """한국어 최적화 베타 모드 활성 여부."""
+    return os.getenv("SONOTE_BETA") == "1"
+
+
+def _effective_speech_threshold() -> float:
+    """베타 모드에 따라 적용할 음성 판정 임계값."""
+    if _is_korean_beta_mode():
+        return KOREAN_SPEECH_THRESHOLD
+    return SPEECH_THRESHOLD
+
+
+def _effective_min_segment_duration() -> float:
+    """베타 모드에 따라 적용할 최소 세그먼트 길이."""
+    if _is_korean_beta_mode():
+        return KOREAN_MIN_SEGMENT_DURATION
+    return MIN_SEGMENT_DURATION
+
+
+def _effective_base_threshold() -> float:
+    """베타 모드에 따라 적용할 기본 유사도 임계값."""
+    if _is_korean_beta_mode():
+        return KOREAN_BASE_THRESHOLD
+    return BASE_THRESHOLD
+
+
+def _effective_ema_alpha(default_alpha: float) -> float:
+    """베타 모드에서 기본 EMA_ALPHA 값을 한국어 프리셋으로 대체."""
+    if _is_korean_beta_mode() and np.isclose(default_alpha, EMA_ALPHA):
+        return KOREAN_EMA_ALPHA
+    return default_alpha
+
+
+def _merge_short_backchannel(
+    segments: list[dict[str, Any]],
+    max_duration: float = KOREAN_BACKCHANNEL_MAX_DURATION,
+) -> list[dict[str, Any]]:
+    """짧은 추임새 세그먼트를 인접 동일 화자 구간으로 병합.
+
+    0.3초 미만 세그먼트가 앞/뒤 화자 사이에 끼어 있고
+    앞/뒤 화자가 동일할 때, 가운데 세그먼트를 별도 화자로 유지하지 않는다.
+    """
+    if len(segments) < 3:
+        return segments
+
+    merged: list[dict[str, Any]] = []
+    idx = 0
+
+    while idx < len(segments):
+        current = dict(segments[idx])
+        current_duration = float(current["end"]) - float(current["start"])
+
+        if 0.0 < current_duration < max_duration and merged and idx + 1 < len(segments):
+            next_segment = segments[idx + 1]
+            prev_segment = merged[-1]
+            if prev_segment["speaker"] == next_segment["speaker"]:
+                # 앞뒤 동일 화자면 가운데 짧은 추임새 세그먼트는 흡수
+                prev_segment["end"] = max(
+                    float(prev_segment["end"]), float(next_segment["end"]),
+                )
+                idx += 2
+                continue
+
+        if merged and merged[-1]["speaker"] == current["speaker"]:
+            merged[-1]["end"] = max(float(merged[-1]["end"]), float(current["end"]))
+        else:
+            merged.append(current)
+
+        idx += 1
+
+    return merged
+
 
 class SpeakerDiarizer:
     """실시간 화자 분리기 — 세그먼테이션 + 구간별 임베딩 방식
@@ -104,7 +184,7 @@ class SpeakerDiarizer:
 
         self.device: str = requested_device
         self._fixed_threshold: float | None = similarity_threshold
-        self._ema_alpha: float = ema_alpha
+        self._ema_alpha: float = _effective_ema_alpha(ema_alpha)
         self._max_speakers: int = max_speakers
         self._hf_token: str | None = hf_token or os.environ.get("HF_TOKEN")
         self._torch_device = torch.device(self.device)
@@ -140,7 +220,7 @@ class SpeakerDiarizer:
         """현재 유사도 임계값 (고정 또는 동적)."""
         if self._fixed_threshold is not None:
             return self._fixed_threshold
-        return BASE_THRESHOLD + self.get_speaker_count() * THRESHOLD_PER_SPEAKER
+        return _effective_base_threshold() + self.get_speaker_count() * THRESHOLD_PER_SPEAKER
 
     @property
     def segmentation_available(self) -> bool:
@@ -214,11 +294,13 @@ class SpeakerDiarizer:
 
         # 2. 구간별 임베딩 추출 + 글로벌 화자 매칭
         results: list[dict[str, Any]] = []
+        min_segment_samples = int(_effective_min_segment_duration() * sample_rate)
+
         for seg in local_segments:
             start_sample = int(seg["start"] * sample_rate)
             end_sample = min(int(seg["end"] * sample_rate), len(audio_chunk))
 
-            if (end_sample - start_sample) < int(MIN_SEGMENT_DURATION * sample_rate):
+            if (end_sample - start_sample) < min_segment_samples:
                 continue
 
             seg_audio = audio_chunk[start_sample:end_sample]
@@ -232,6 +314,9 @@ class SpeakerDiarizer:
                 "start": seg["start"],
                 "end": seg["end"],
             })
+
+        if _is_korean_beta_mode():
+            return _merge_short_backchannel(results)
 
         return results
 
@@ -583,7 +668,7 @@ class SpeakerDiarizer:
 
         # 프레임별 주 화자 + 음성 여부 판정
         dominant = probs_np.argmax(axis=1)
-        is_speech = probs_np.max(axis=1) > SPEECH_THRESHOLD
+        is_speech = probs_np.max(axis=1) > _effective_speech_threshold()
 
         # 연속 화자 구간 추출
         segments: list[dict[str, Any]] = []

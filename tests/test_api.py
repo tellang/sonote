@@ -6,6 +6,7 @@ SSE 스트림, 교정 이벤트, 후처리 상태 폴백, 키워드 전파,
 
 import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -330,9 +331,78 @@ class TestKeywordPropagation:
         assert "A" not in data["manual"]
         assert "A" not in data["keywords"]
 
+    @pytest.mark.asyncio
+    async def test_remove_missing_keyword_does_not_add_blocked(self, client: httpx.AsyncClient):
+        """존재하지 않는 키워드 삭제는 blocked 목록을 오염시키지 않는다."""
+        response = await client.post("/remove-keyword", json={"keyword": "없는키워드"})
+        assert response.status_code == 200
+        data = response.json()
+        assert "없는키워드" not in data["blocked"]
+
+    @pytest.mark.asyncio
+    async def test_delete_remove_keyword_supported(self, client: httpx.AsyncClient):
+        """DELETE /remove-keyword도 POST와 동일하게 동작한다."""
+        await client.post("/add-keyword", json={"keyword": "삭제대상"})
+        response = await client.request("DELETE", "/remove-keyword", json={"keyword": "삭제대상"})
+        assert response.status_code == 200
+        data = response.json()
+        assert "삭제대상" not in data["keywords"]
+        assert "삭제대상" in data["blocked"]
+
 
 # ---------------------------------------------------------------------------
-# 4. /history 일관성 (Medium)
+# 4. /api/load-transcript 경로 검증 (High/Security)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadTranscriptPathValidation:
+    """load-transcript 엔드포인트의 경로 정규화/검증을 테스트한다."""
+
+    @pytest.mark.asyncio
+    async def test_requires_path_parameter(self, client: httpx.AsyncClient):
+        """path가 비어 있으면 400을 반환한다."""
+        response = await client.post("/api/load-transcript", json={})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "path 파라미터가 필요합니다."
+
+    @pytest.mark.asyncio
+    async def test_rejects_path_outside_output_root(self, tmp_path, monkeypatch, client):
+        """OUTPUT_ROOT 밖의 경로는 거부한다."""
+        output_root = tmp_path / "output"
+        output_root.mkdir(parents=True)
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("외부 파일", encoding="utf-8")
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", output_root)
+
+        response = await client.post(
+            "/api/load-transcript",
+            json={"path": str(outside_file)},
+        )
+        assert response.status_code == 400
+        assert "output 디렉토리 밖의 파일" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(os.name != "nt", reason="Windows 백슬래시 경로 재현 테스트")
+    async def test_accepts_windows_backslash_path(self, tmp_path, monkeypatch, client):
+        """Windows 백슬래시 절대 경로를 정상 처리한다."""
+        output_root = tmp_path / "output"
+        transcript_file = output_root / "transcripts" / "2026-03-16" / "transcript.corrected.txt"
+        transcript_file.parent.mkdir(parents=True)
+        transcript_file.write_text("[00:00 ~ 00:01] 테스트 라인", encoding="utf-8")
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", output_root)
+
+        response = await client.post(
+            "/api/load-transcript",
+            json={"path": str(transcript_file)},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["loaded"] == 1
+        assert payload["file"].endswith("transcript.corrected.txt")
+
+
+# ---------------------------------------------------------------------------
+# 5. /history 일관성 (Medium)
 # ---------------------------------------------------------------------------
 
 
@@ -397,7 +467,7 @@ class TestHistoryConsistency:
 
 
 # ---------------------------------------------------------------------------
-# 5. MEETING_API_KEY 인증 (Medium)
+# 6. MEETING_API_KEY 인증 (Medium)
 # ---------------------------------------------------------------------------
 
 

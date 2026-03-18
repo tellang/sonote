@@ -7,6 +7,8 @@ import sys
 from pathlib import Path, PureWindowsPath
 from typing import Final
 
+from .runtime.context import is_frozen
+
 try:
     import winreg as _WINREG
 except ImportError:  # pragma: no cover - 비 Windows 환경 폴백
@@ -23,7 +25,7 @@ class AutostartError(RuntimeError):
 
 def get_exe_path() -> str:
     """현재 실행 파일 경로를 반환한다."""
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         return _resolve_current_path(sys.executable)
 
     argv0 = Path(sys.argv[0]).expanduser() if sys.argv and sys.argv[0] else None

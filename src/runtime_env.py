@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import site
 
+from .runtime.context import get_project_root, is_frozen
+
 _NVIDIA_DLL_BOOTSTRAPPED = False
 
 
@@ -16,15 +18,15 @@ def bootstrap_nvidia_dll_path() -> None:
     DLL이 번들되므로 해당 경로를 우선 추가한다.
     """
     global _NVIDIA_DLL_BOOTSTRAPPED
-    import sys
 
     if _NVIDIA_DLL_BOOTSTRAPPED:
         return
 
     # frozen exe: DLL이 exe와 같은 디렉토리에 번들됨
-    if getattr(sys, "frozen", False):
-        exe_dir = str(Path(sys.executable).parent)
-        internal_dir = str(Path(sys.executable).parent / "_internal")
+    if is_frozen():
+        exe_root = get_project_root()
+        exe_dir = str(exe_root)
+        internal_dir = str(exe_root / "_internal")
         for d in [exe_dir, internal_dir]:
             if d not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")

@@ -15,25 +15,23 @@
 
 from __future__ import annotations
 
-import sys
 from datetime import datetime
 from pathlib import Path
+
+from .runtime.context import get_bundle_dir, get_project_root, is_frozen
 
 
 def project_root() -> Path:
     """프로젝트(또는 exe 번들) 루트 디렉토리를 반환한다."""
-    if getattr(sys, "frozen", False):
-        # PyInstaller onedir: exe 옆이 루트
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+    return get_project_root()
 
 
 def static_dir() -> Path:
     """static 리소스 디렉토리를 반환한다."""
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         # PyInstaller: _MEIPASS 내부에 datas로 포함됨
-        return Path(getattr(sys, "_MEIPASS", "")) / "static"
-    return Path(__file__).resolve().parent.parent / "static"
+        return get_bundle_dir() / "static"
+    return get_project_root() / "static"
 
 
 # 프로젝트 루트 기준 output 디렉토리
