@@ -10,6 +10,7 @@ CLI 미설치 시 Ollama 폴백. --ollama로 Ollama 전용 모드.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -37,6 +38,43 @@ _DEFAULT_TIMEOUT = 300
 # --- Ollama 설정 ---
 _OLLAMA_DEFAULT_MODEL = "gemma3:27b"
 _OLLAMA_BASE_URL = "http://localhost:11434"
+
+# --- 해시 기반 보정 캐시 (동일 텍스트 재보정 방지) ---
+_correction_cache: dict[str, list[str]] = {}
+
+
+def _build_domain_keyword_hint(max_chars: int = 200) -> str:
+    """domain_keywords.py의 전문 용어를 보정 프롬프트용 힌트로 구성."""
+    from .domain_keywords import DEFAULT_MEETING_PROMPT_KEYWORDS
+
+    selected: list[str] = []
+    used = 0
+    for kw in DEFAULT_MEETING_PROMPT_KEYWORDS:
+        addition = len(kw) if not selected else len(kw) + 2
+        if used + addition > max_chars:
+            break
+        selected.append(kw)
+        used += addition
+    return ", ".join(selected) if selected else ""
+
+
+def _compute_batch_hash(lines: list[str]) -> str:
+    """배치 라인 목록의 해시값 계산."""
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _get_cached_correction(batch_hash: str) -> list[str] | None:
+    """캐시에서 보정 결과 조회."""
+    return _correction_cache.get(batch_hash)
+
+
+def _set_cached_correction(batch_hash: str, corrected: list[str]) -> None:
+    """보정 결과를 캐시에 저장. 최대 500 엔트리."""
+    if len(_correction_cache) >= 500:
+        # 가장 오래된 항목부터 제거 (dict는 삽입 순서 보장)
+        oldest = next(iter(_correction_cache))
+        del _correction_cache[oldest]
+    _correction_cache[batch_hash] = corrected
 
 
 def is_codex_available() -> bool:
@@ -127,10 +165,16 @@ def correct_with_codex(md_path: Path, timeout: int = _DEFAULT_TIMEOUT) -> bool:
     import shutil as _shutil
     _shutil.copy2(abs_path, backup_path)
     original_lines = abs_path.read_text(encoding="utf-8").count("\n")
+
+    # 도메인 키워드 힌트
+    domain_hint = _build_domain_keyword_hint()
+    domain_line = f"참고할 전문 용어: {domain_hint}\n" if domain_hint else ""
+
     prompt = (
         f'회의록 파일 "{abs_path}"의 "# Raw Data" 섹션에서 '
         "STT 오인식을 맥락 기반으로 교정해줘. "
         "동음이의어/유사음 오인식, 기술 용어 오류, 명백한 문법 오류만 수정. "
+        f"{domain_line}"
         "형식 '- [HH:MM:SS] [화자] 텍스트' 유지, 타임스탬프/화자 라벨 수정 금지. "
         "절대 금지: Raw Data 섹션의 줄을 삭제하지 마라. 모든 세그먼트를 유지하고 텍스트만 교정하라. "
         "절대 금지: 파일의 다른 섹션(요약, To-do, 메타데이터)을 수정하거나 삭제하지 마라. "
@@ -175,16 +219,44 @@ def _correct_batch(
     batch_idx: int,
     work_dir: Path,
     timeout: int,
+    prev_context: list[str] | None = None,
+    next_context: list[str] | None = None,
 ) -> tuple[int, bool, list[str]]:
-    """단일 배치의 STT 오인식 교정. 임시 파일에서 작업."""
+    """단일 배치의 STT 오인식 교정. 임시 파일에서 작업.
+
+    Args:
+        prev_context: 이전 배치의 마지막 N줄 (슬라이딩 윈도우 문맥)
+        next_context: 다음 배치의 첫 N줄 (슬라이딩 윈도우 문맥)
+    """
+    # 캐시 확인
+    batch_hash = _compute_batch_hash(batch_lines)
+    cached = _get_cached_correction(batch_hash)
+    if cached is not None and len(cached) == len(batch_lines):
+        print(f"[후처리] 배치 {batch_idx}: 캐시 히트")
+        return batch_idx, True, cached
+
     temp_path = work_dir / f".polish-batch-{batch_idx}.txt"
     temp_path.write_text("\n".join(batch_lines) + "\n", encoding="utf-8")
     original_count = len(batch_lines)
+
+    # 도메인 키워드 힌트
+    domain_hint = _build_domain_keyword_hint()
+    domain_line = f"참고할 전문 용어: {domain_hint}\n" if domain_hint else ""
+
+    # 슬라이딩 윈도우 문맥
+    context_parts: list[str] = []
+    if prev_context:
+        context_parts.append("이전 문맥:\n" + "\n".join(prev_context))
+    if next_context:
+        context_parts.append("다음 문맥:\n" + "\n".join(next_context))
+    context_line = "\n".join(context_parts) + "\n" if context_parts else ""
 
     prompt = (
         f'파일 "{temp_path.name}"의 회의 전사 내용에서 '
         "STT 오인식을 맥락 기반으로 교정해줘. "
         "동음이의어/유사음 오인식, 기술 용어 오류, 명백한 문법 오류만 수정. "
+        f"{domain_line}"
+        f"{context_line}"
         "형식 '- [HH:MM:SS] [화자] 텍스트' 유지, 타임스탬프/화자 라벨 수정 금지. "
         "절대 금지: 줄을 삭제하거나 추가하지 마라. 줄 수를 반드시 유지하라. "
         "교정 후 같은 파일에 저장."
@@ -209,6 +281,7 @@ def _correct_batch(
         # 줄 수 검증 — 불일치 시 원본 유지
         if len(result_lines) == original_count:
             corrected = result_lines
+            _set_cached_correction(batch_hash, corrected)
         else:
             print(
                 f"[후처리] 배치 {batch_idx}: 줄 수 불일치 "
@@ -281,13 +354,28 @@ def correct_with_codex_parallel(
     any_success = False
     work_dir = abs_path.parent
 
-    # 병렬 실행
+    # 슬라이딩 윈도우 문맥 크기 (배치 경계의 전후 N줄)
+    _CONTEXT_WINDOW = 3
+
+    # 병렬 실행 — 각 배치에 이전/다음 문맥 전달
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for batch_idx, batch in enumerate(batches):
             batch_lines = [text for _, text in batch]
+            # 이전 배치 마지막 N줄
+            prev_ctx: list[str] | None = None
+            if batch_idx > 0:
+                prev_batch = batches[batch_idx - 1]
+                prev_ctx = [text for _, text in prev_batch[-_CONTEXT_WINDOW:]]
+            # 다음 배치 첫 N줄
+            next_ctx: list[str] | None = None
+            if batch_idx < len(batches) - 1:
+                next_batch = batches[batch_idx + 1]
+                next_ctx = [text for _, text in next_batch[:_CONTEXT_WINDOW]]
+
             future = pool.submit(
                 _correct_batch, batch_lines, batch_idx, work_dir, per_batch_timeout,
+                prev_ctx, next_ctx,
             )
             futures[future] = (batch_idx, batch)
 
@@ -336,16 +424,22 @@ def correct_with_codex_parallel(
 
 
 def summarize_with_gemini(md_path: Path, timeout: int = _DEFAULT_TIMEOUT) -> bool:
-    """Gemini CLI로 요약 + To-do 생성.
+    """Gemini CLI로 구조화된 요약 + To-do 생성.
 
     파일의 placeholder 섹션을 채움.
+    요약 구조: 주제, 참석자 역할, 안건별 논의, 결정사항, 결론.
     """
     abs_path = md_path.resolve()
     prompt = (
-        f'회의록 파일 "{abs_path}"을 읽고 요약과 To-do를 생성해줘. '
-        '"- (요약은 회의 후 별도 작성)" 줄을 구조화된 요약으로 교체하고 '
-        '"- [ ] (회의 후 별도 작성)" 줄을 구체적 행동 항목으로 교체해. '
-        "요약은 ## 주제, ## 핵심 논의(번호별 소제목), ## 결론 형식. "
+        f'회의록 파일 "{abs_path}"을 읽고 구조화된 요약과 To-do를 생성해줘. '
+        '"- (요약은 회의 후 별도 작성)" 줄을 아래 형식의 요약으로 교체: '
+        "## 주제 (한 줄 요약), "
+        "## 참석자 역할 (각 화자의 역할/기여), "
+        "## 안건별 논의 (### 번호. 안건 제목 + 내용), "
+        "## 결정사항 (합의 항목), "
+        "## 결론. "
+        '"- [ ] (회의 후 별도 작성)" 줄을 '
+        '"- [ ] [담당자] 액션 아이템 (기한)" 형식의 구체적 행동 항목으로 교체. '
         "Raw Data 섹션과 메타데이터(일시/경과시간/참석자)는 수정 금지. "
         "결과를 같은 파일에 저장."
     )
@@ -441,17 +535,46 @@ def _correct_batch_ollama(
     batch_idx: int,
     model: str = _OLLAMA_DEFAULT_MODEL,
     timeout: int = 120,
+    prev_context: list[str] | None = None,
+    next_context: list[str] | None = None,
 ) -> tuple[int, bool, list[str]]:
-    """Ollama로 단일 배치 STT 교정."""
+    """Ollama로 단일 배치 STT 교정.
+
+    Args:
+        prev_context: 이전 배치의 마지막 N줄 (슬라이딩 윈도우 문맥)
+        next_context: 다음 배치의 첫 N줄 (슬라이딩 윈도우 문맥)
+    """
+    # 캐시 확인
+    batch_hash = _compute_batch_hash(batch_lines)
+    cached = _get_cached_correction(batch_hash)
+    if cached is not None and len(cached) == len(batch_lines):
+        print(f"[후처리] Ollama 배치 {batch_idx}: 캐시 히트")
+        return batch_idx, True, cached
+
     text = "\n".join(batch_lines)
     original_count = len(batch_lines)
 
+    # 도메인 키워드 힌트
+    domain_hint = _build_domain_keyword_hint()
+    domain_line = f"참고할 전문 용어: {domain_hint}\n" if domain_hint else ""
+
+    # 슬라이딩 윈도우 문맥
+    context_parts: list[str] = []
+    if prev_context:
+        context_parts.append("[이전 문맥 — 교정 대상 아님]\n" + "\n".join(prev_context))
+    if next_context:
+        context_parts.append("[다음 문맥 — 교정 대상 아님]\n" + "\n".join(next_context))
+    context_block = "\n\n".join(context_parts) + "\n\n" if context_parts else ""
+
     prompt = (
         "다음은 한국어 STT 결과입니다. 오인식된 부분만 교정하세요.\n"
+        f"{domain_line}"
         "형식 '- [HH:MM:SS] [화자] 텍스트' 유지. 타임스탬프/화자 수정 금지.\n"
         "줄 삭제/추가 금지. 줄 수 반드시 유지.\n"
-        "교정 결과만 출력:\n\n"
-        f"{text}"
+        f"{context_block}"
+        "[교정 대상]\n"
+        f"{text}\n\n"
+        "교정 결과만 출력:"
     )
 
     ok, result = _run_ollama(prompt, model, timeout)
@@ -461,6 +584,7 @@ def _correct_batch_ollama(
 
     result_lines = [line for line in result.strip().split("\n") if line.strip()]
     if len(result_lines) == original_count:
+        _set_cached_correction(batch_hash, result_lines)
         return batch_idx, True, result_lines
 
     print(
@@ -523,13 +647,27 @@ def correct_with_ollama_parallel(
     all_corrected: dict[int, str] = {}
     any_success = False
 
+    # 슬라이딩 윈도우 문맥 크기
+    _CONTEXT_WINDOW = 3
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {}
         for batch_idx, batch in enumerate(batches):
             batch_lines_text = [text_val for _, text_val in batch]
+            # 이전 배치 마지막 N줄
+            prev_ctx: list[str] | None = None
+            if batch_idx > 0:
+                prev_batch = batches[batch_idx - 1]
+                prev_ctx = [text_val for _, text_val in prev_batch[-_CONTEXT_WINDOW:]]
+            # 다음 배치 첫 N줄
+            next_ctx: list[str] | None = None
+            if batch_idx < len(batches) - 1:
+                next_batch = batches[batch_idx + 1]
+                next_ctx = [text_val for _, text_val in next_batch[:_CONTEXT_WINDOW]]
+
             future = pool.submit(
                 _correct_batch_ollama, batch_lines_text, batch_idx,
-                model, per_batch_timeout,
+                model, per_batch_timeout, prev_ctx, next_ctx,
             )
             futures[future] = (batch_idx, batch)
 
@@ -595,7 +733,11 @@ def summarize_with_ollama(
     model: str = _OLLAMA_DEFAULT_MODEL,
     timeout: int = _DEFAULT_TIMEOUT,
 ) -> bool:
-    """Ollama로 회의 요약 + To-do 생성."""
+    """Ollama로 구조화된 회의 요약 + To-do 생성.
+
+    요약 구조: 주제, 참석자 역할, 안건별 논의, 결정사항, 결론.
+    To-do: 담당자 + 기한 포함 액션 아이템.
+    """
     abs_path = md_path.resolve()
     content = abs_path.read_text(encoding="utf-8")
 
@@ -605,11 +747,27 @@ def summarize_with_ollama(
         return False
     raw_data = content[raw_start:raw_start + 8000]
 
+    # 메타데이터 추출 (참석자 정보 등)
+    meta_match = re.search(
+        r"- 참석자:\s*(.+)",
+        content[:raw_start] if raw_start > 0 else content,
+    )
+    participants_hint = ""
+    if meta_match:
+        participants_hint = f"참석자 정보: {meta_match.group(1).strip()}\n"
+
     prompt = (
-        "다음 회의 녹취록을 분석하여 요약과 To-do를 생성하세요.\n\n"
-        "출력 형식 (구분자 포함):\n"
-        "=== 요약 ===\n## 주제\n...\n## 핵심 논의\n...\n## 결론\n...\n"
-        "=== To-do ===\n- [ ] 항목1\n- [ ] 항목2\n\n"
+        "다음 회의 녹취록을 분석하여 구조화된 요약과 To-do를 생성하세요.\n\n"
+        f"{participants_hint}"
+        "출력 형식 (구분자 포함, 반드시 준수):\n"
+        "=== 요약 ===\n"
+        "## 주제\n회의 주제 한 줄 요약\n\n"
+        "## 참석자 역할\n- [화자명]: 역할/기여 요약\n\n"
+        "## 안건별 논의\n### 1. 안건 제목\n- 논의 내용 요약\n- 주요 발언 요약\n\n"
+        "## 결정사항\n- 합의된 결정 항목\n\n"
+        "## 결론\n전체 회의 결론 요약\n\n"
+        "=== To-do ===\n"
+        "- [ ] [담당자] 액션 아이템 (기한: 있으면 명시)\n\n"
         f"{raw_data}"
     )
     ok, result = _run_ollama(prompt, model, timeout)

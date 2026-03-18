@@ -366,7 +366,7 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             assert rotate_response.status_code == 200
             assert rotate_response.json()["session_id"].count("_") == 1
             assert server.is_session_rotate_requested() is True
-            assert server._transcript_history == []
+            assert len(server._transcript_history) == 0
             assert server._segment_count == 0
             assert server._speakers == set()
 

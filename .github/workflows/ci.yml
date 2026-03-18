@@ -1,0 +1,79 @@
+# CI 워크플로우 — lint(ruff+mypy) / test(pytest+coverage) 병렬 실행
+# README 배지: https://github.com/tellang/media-transcriber/actions/workflows/ci.yml/badge.svg
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Lint job: ruff + mypy (Python 3.11 고정) ──
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: uv 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-lint-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-lint-${{ runner.os }}-py3.11-
+
+      - name: 의존성 설치
+        run: uv sync --extra pdf
+        env:
+          UV_NO_BUILD_ISOLATION: false
+
+      - name: Lint (ruff)
+        run: uv run ruff check src/
+
+      - name: Type check (mypy)
+        run: uv run mypy src/
+
+  # ── Test job: pytest + coverage (매트릭스) ──
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: uv 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-test-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-test-${{ runner.os }}-py${{ matrix.python-version }}-
+
+      - name: 의존성 설치
+        run: uv sync --extra pdf
+        env:
+          UV_NO_BUILD_ISOLATION: false
+
+      - name: 테스트 + 커버리지 (pytest)
+        run: uv run pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term-missing

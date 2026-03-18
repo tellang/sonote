@@ -49,6 +49,45 @@ class CliDispatchTests(unittest.TestCase):
         self.assertEqual(parsed_args.command, "approve-profiles")
         self.assertEqual(parsed_args.review, "review.json")
 
+    def test_auto_command_dispatch(self) -> None:
+        with patch.object(cli, "_cmd_smart") as handler:
+            with patch.object(
+                sys,
+                "argv",
+                ["media-transcriber", "auto", "https://youtube.com/watch?v=test"],
+            ):
+                cli.main()
+
+        handler.assert_called_once()
+        parsed_args = handler.call_args.args[0]
+        self.assertEqual(parsed_args.url, "https://youtube.com/watch?v=test")
+
+    def test_detect_command_dispatch(self) -> None:
+        with patch.object(cli, "_cmd_probe") as handler:
+            with patch.object(
+                sys,
+                "argv",
+                ["media-transcriber", "detect", "https://youtube.com/watch?v=test"],
+            ):
+                cli.main()
+
+        handler.assert_called_once()
+        parsed_args = handler.call_args.args[0]
+        self.assertEqual(parsed_args.url, "https://youtube.com/watch?v=test")
+
+    def test_map_command_dispatch(self) -> None:
+        with patch.object(cli, "_cmd_scan") as handler:
+            with patch.object(
+                sys,
+                "argv",
+                ["media-transcriber", "map", "https://youtube.com/watch?v=test"],
+            ):
+                cli.main()
+
+        handler.assert_called_once()
+        parsed_args = handler.call_args.args[0]
+        self.assertEqual(parsed_args.url, "https://youtube.com/watch?v=test")
+
     def test_ssafy_command_is_not_available(self) -> None:
         with patch.object(sys, "argv", ["media-transcriber", "ssafy"]):
             with patch("sys.stderr", new=StringIO()) as fake_stderr:

@@ -33,6 +33,24 @@ EXIT_PREFLIGHT_FAIL = 5
 EXIT_MODEL_ERROR = 3
 EXIT_NOT_FOUND = 4
 
+# --- EXIT_* → reason enum 매핑 (AI 에이전트용 기계 판독 가능 에러 분류) ---
+_EXIT_REASON_MAP: dict[int, str] = {
+    EXIT_ERROR: "runtimeError",
+    EXIT_ARG_ERROR: "argError",
+    EXIT_MODEL_ERROR: "modelError",
+    EXIT_NOT_FOUND: "notFound",
+    EXIT_PREFLIGHT_FAIL: "preflightFail",
+}
+
+# --- code 문자열 → reason enum 매핑 (json_output의 code 파라미터용) ---
+_CODE_REASON_MAP: dict[str, str] = {
+    "ERROR": "runtimeError",
+    "ARG_ERROR": "argError",
+    "MODEL_ERROR": "modelError",
+    "NOT_FOUND": "notFound",
+    "PREFLIGHT_FAIL": "preflightFail",
+}
+
 
 # ---------------------------------------------------------------------------
 # 1) Dynamic Command Surface — 런타임 환경에 따라 기능 가용성 표시
@@ -115,7 +133,7 @@ def _collect_manual_steps(args: argparse.Namespace) -> list[dict[str, str]]:
         })
 
     # ffmpeg 미설치 + ffmpeg 필요 커맨드
-    if command in ("live", "download", "smart", "probe", "scan") and not shutil.which("ffmpeg"):
+    if command in ("live", "download", "smart", "probe", "scan", "auto", "detect", "map") and not shutil.which("ffmpeg"):
         steps.append({
             "tag": "MANUAL",
             "message": "ffmpeg를 설치하세요 (오디오 다운로드/변환에 필수)",
@@ -138,8 +156,8 @@ def preflight_check(args: argparse.Namespace) -> dict[str, Any]:
     command = getattr(args, "command", "")
     all_passed = True
 
-    # ffmpeg 점검 (라이브/다운로드/스마트/프로브/스캔)
-    if command in ("live", "download", "smart", "probe", "scan", "meeting"):
+    # ffmpeg 점검 (라이브/다운로드/분석 커맨드)
+    if command in ("live", "download", "smart", "probe", "scan", "auto", "detect", "map", "meeting"):
         has_ffmpeg = shutil.which("ffmpeg") is not None
         checks.append({
             "name": "ffmpeg",
@@ -151,7 +169,7 @@ def preflight_check(args: argparse.Namespace) -> dict[str, Any]:
             all_passed = False
 
     # CUDA/모델 점검 (전사 관련)
-    if command in ("transcribe", "live", "smart", "meeting"):
+    if command in ("transcribe", "live", "smart", "auto", "meeting"):
         try:
             from .runtime_env import detect_device
             device, compute_type = detect_device()
@@ -194,7 +212,7 @@ def preflight_check(args: argparse.Namespace) -> dict[str, Any]:
             all_passed = False
 
     # yt-dlp 점검 (YouTube 관련)
-    if command in ("live", "download", "smart", "probe", "scan"):
+    if command in ("live", "download", "smart", "probe", "scan", "auto", "detect", "map"):
         has_ytdlp = shutil.which("yt-dlp") is not None
         checks.append({
             "name": "yt_dlp",
@@ -231,7 +249,11 @@ def json_output(
     error: str | None = None,
     code: str | None = None,
 ) -> str:
-    """--json 모드용 구조화 출력 생성."""
+    """--json 모드용 구조화 출력 생성.
+
+    에러 시 ``reason`` enum을 자동 매핑하여 AI 에이전트가
+    기계적으로 에러 유형을 분기할 수 있게 한다.
+    """
     payload: dict[str, Any] = {"status": status, "command": command}
     if status == "success":
         payload["data"] = data or {}
@@ -239,13 +261,70 @@ def json_output(
         payload["error"] = error or "unknown error"
         if code:
             payload["code"] = code
+            payload["reason"] = _CODE_REASON_MAP.get(code, "runtimeError")
+        else:
+            payload["reason"] = "runtimeError"
         if data:
             payload["data"] = data
     return _json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+# --- 서브커맨드별 필수 외부 의존성 (schema 출력에 포함) ---
+_COMMAND_DEPENDENCIES: dict[str, list[dict[str, str]]] = {
+    "transcribe": [
+        {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+    ],
+    "live": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+        {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+    ],
+    "download": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+    ],
+    "probe": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+    ],
+    "scan": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+    ],
+    "smart": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+        {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+    ],
+    "detect": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+    ],
+    "map": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+    ],
+    "auto": [
+        {"name": "ffmpeg", "required": True, "description": "오디오 다운로드/변환"},
+        {"name": "yt-dlp", "required": True, "description": "YouTube 라이브 오디오 추출"},
+        {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+    ],
+    "meeting": [
+        {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+        {"name": "ffmpeg", "required": False, "description": "오디오 변환 (선택)"},
+    ],
+    "enroll": [
+        {"name": "HF_TOKEN", "required": True, "description": "Hugging Face 토큰 (화자 임베딩 추출)"},
+        {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+    ],
+}
+
+
 def _extract_parser_schema(parser: argparse.ArgumentParser) -> dict[str, Any]:
-    """argparse 파서에서 서브커맨드 스키마를 자동 추출."""
+    """argparse 파서에서 서브커맨드 스키마를 자동 추출.
+
+    각 서브커맨드의 필수 외부 의존성(GPU, CUDA, ffmpeg 등)도 포함한다.
+    """
     schema: dict[str, Any] = {
         "name": parser.prog,
         "description": parser.description or "",
@@ -270,6 +349,13 @@ def _extract_parser_schema(parser: argparse.ArgumentParser) -> dict[str, Any]:
             param["choices"] = list(action.choices)
         params.append(param)
     schema["parameters"] = params
+
+    # 서브커맨드 이름 추출 (prog에서 마지막 토큰)
+    cmd_name = parser.prog.rsplit(None, 1)[-1] if parser.prog else ""
+    deps = _COMMAND_DEPENDENCIES.get(cmd_name, [])
+    if deps:
+        schema["dependencies"] = deps
+
     return schema
 
 
@@ -320,9 +406,15 @@ def _run_async_polish_process(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="한국어 음성 인식 (STT) — YouTube 라이브/회의",
+        description="sonote — AI 에이전트를 위한 소리 노트",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+서브커맨드 그룹:
+  전사:  transcribe, live, download
+  분석:  detect, map, auto
+  회의:  meeting, approve
+  관리:  profile, schema
+
 사용 예시:
   # 로컬 오디오 파일 변환
   media-transcriber transcribe audio.wav
@@ -393,9 +485,9 @@ def main():
         help="BGM 구간을 건너뛰고 강의 시작 지점 자동 탐색",
     )
 
-    # probe: BGM↔강의 경계 탐색
+    # detect (구: probe): BGM↔강의 경계 탐색
     p_probe = subparsers.add_parser(
-        "probe", help="라이브 스트림에서 강의 시작 지점 탐색 (BGM 건너뛰기)",
+        "detect", help="라이브 스트림에서 강의 시작 지점 탐색 (구: probe)",
     )
     p_probe.add_argument("url", help="YouTube URL")
     p_probe.add_argument(
@@ -403,9 +495,9 @@ def main():
         help="최대 탐색 범위(분) (기본: 180)",
     )
 
-    # scan: 전체 구간 맵핑
+    # map (구: scan): 전체 구간 맵핑
     p_scan = subparsers.add_parser(
-        "scan", help="라이브 스트림 전체 구간 맵핑 (BGM/강의/쉬는시간 구분)",
+        "map", help="라이브 스트림 전체 구간 맵핑 (구: scan)",
     )
     p_scan.add_argument("url", help="YouTube URL")
     p_scan.add_argument(
@@ -421,9 +513,9 @@ def main():
         help="DB 캐시 무시, 강제 재스캔",
     )
 
-    # smart: 스캔 → 병렬 다운로드 → 변환 → 병합 (올인원)
+    # auto (구: smart): 스캔 → 병렬 다운로드 → 변환 → 병합 (올인원)
     p_smart = subparsers.add_parser(
-        "smart", help="스캔+병렬다운로드+변환 올인원",
+        "auto", help="스캔+병렬다운로드+변환 올인원 (구: smart)",
     )
     p_smart.add_argument("url", help="YouTube URL")
     p_smart.add_argument("-o", "--output", default=None, help="출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)")
@@ -559,11 +651,60 @@ def main():
         help="실제 전사 없이 설정값만 출력 (--json과 함께 사용 권장)",
     )
 
-    p_approve = subparsers.add_parser("approve-profiles", help="회의 후 검토한 후보 프로필 적용")
+    # status: 환경 진단 독립 실행
+    subparsers.add_parser(
+        "status",
+        help="GPU/모델/디스크/외부 도구 상태 진단 (preflight_check 독립 실행)",
+    )
+
+    p_approve = subparsers.add_parser("approve", help="회의 후 후보 프로필 적용 (구: approve-profiles)")
     p_approve.add_argument("review", help="meeting *.profile-review.json 경로")
     p_approve.add_argument("--profiles", help="적용 대상 프로필 JSON (기본: review 파일의 base_profiles_path)")
 
+    # --- deprecated aliases (하위 호환) ---
+    # probe → detect
+    _p_probe_old = subparsers.add_parser("probe", help="[deprecated] detect를 사용하세요")
+    _p_probe_old.add_argument("url", help="YouTube URL")
+    _p_probe_old.add_argument("--max-back", type=int, default=180, help="최대 탐색 범위(분)")
+    # scan → map
+    _p_scan_old = subparsers.add_parser("scan", help="[deprecated] map을 사용하세요")
+    _p_scan_old.add_argument("url", help="YouTube URL")
+    _p_scan_old.add_argument("--max-back", type=int, default=180, help="최대 탐색 범위(분)")
+    _p_scan_old.add_argument("--step", type=int, default=5, help="프로브 간격(분)")
+    _p_scan_old.add_argument("--force-scan", action="store_true", help="DB 캐시 무시")
+    # smart → auto
+    _p_smart_old = subparsers.add_parser("smart", help="[deprecated] auto를 사용하세요")
+    _p_smart_old.add_argument("url", help="YouTube URL")
+    _p_smart_old.add_argument("-o", "--output", default=None, help="출력 디렉토리")
+    _p_smart_old.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
+    _p_smart_old.add_argument("-l", "--language", default="ko", help="언어 코드")
+    _p_smart_old.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
+    _p_smart_old.add_argument("--fmt", choices=["txt", "srt"], default="txt", help="출력 형식")
+    _p_smart_old.add_argument("--max-back", type=int, default=180, help="최대 탐색 범위(분)")
+    _p_smart_old.add_argument("--step", type=int, default=5, help="스캔 프로브 간격(분)")
+    _p_smart_old.add_argument("--resume", metavar="FILE", help="기존 스크립트와 병합")
+    _p_smart_old.add_argument("--force-scan", action="store_true", help="DB 캐시 무시")
+    # approve-profiles → approve
+    _p_approve_old = subparsers.add_parser("approve-profiles", help="[deprecated] approve를 사용하세요")
+    _p_approve_old.add_argument("review", help="meeting *.profile-review.json 경로")
+    _p_approve_old.add_argument("--profiles", help="적용 대상 프로필 JSON")
+
+    _ALIASES = {
+        "probe": "detect",
+        "scan": "map",
+        "smart": "auto",
+        "approve-profiles": "approve",
+    }
+
     args = parser.parse_args()
+
+    # deprecated alias 감지 시 stderr 경고
+    if args.command in _ALIASES:
+        new_name = _ALIASES[args.command]
+        print(
+            f"[경고] '{args.command}'는 deprecated입니다. '{new_name}'을 사용하세요.",
+            file=sys.stderr,
+        )
 
     is_json = getattr(args, "json_mode", False)
     is_ndjson = getattr(args, "ndjson_mode", False)
@@ -571,6 +712,11 @@ def main():
     # schema 커맨드: 서브커맨드 스키마 자동 출력 + capabilities
     if args.command == "schema":
         _cmd_schema(subparsers, args)
+        return
+
+    # status 커맨드: 환경 진단 독립 실행
+    if args.command == "status":
+        _cmd_status(args)
         return
 
     # --dry-run 처리 (transcribe, meeting) — capabilities/diagnostics 포함
@@ -601,13 +747,13 @@ def main():
             )
             print(output)
         else:
-            print("[사전 점검 실패]")
+            print("[사전 점검 실패]", file=sys.stderr)
             for c in failed:
-                print(f"  ✗ {c['name']}: {c['message']}")
+                print(f"  ✗ {c['name']}: {c['message']}", file=sys.stderr)
             for step in manual_steps:
-                print(f"  [{step['tag']}] {step['message']}")
+                print(f"  [{step['tag']}] {step['message']}", file=sys.stderr)
                 if step.get("hint"):
-                    print(f"    → {step['hint']}")
+                    print(f"    → {step['hint']}", file=sys.stderr)
         sys.exit(EXIT_PREFLIGHT_FAIL)
 
     # [MANUAL] 단계 경고 출력 (점검 통과했지만 수동 단계가 남은 경우)
@@ -619,22 +765,27 @@ def main():
                 print(_ndjson_line("manual_step", **step))
         else:
             for step in manual_steps:
-                print(f"[{step['tag']}] {step['message']}")
+                print(f"[{step['tag']}] {step['message']}", file=sys.stderr)
                 if step.get("hint"):
-                    print(f"  → {step['hint']}")
+                    print(f"  → {step['hint']}", file=sys.stderr)
 
     # 커맨드 디스패치 (--json 모드 에러 핸들링 포함)
     _dispatch = {
         "transcribe": _cmd_transcribe,
         "live": _cmd_live,
         "download": _cmd_download,
+        "detect": _cmd_probe,
+        "map": _cmd_scan,
+        "auto": _cmd_smart,
+        "profile": _cmd_profile,
+        "enroll": _cmd_enroll,
+        "approve": _cmd_approve_profiles,
+        "meeting": _cmd_meeting,
+        # deprecated aliases
         "probe": _cmd_probe,
         "scan": _cmd_scan,
         "smart": _cmd_smart,
-        "profile": _cmd_profile,
-        "enroll": _cmd_enroll,
         "approve-profiles": _cmd_approve_profiles,
-        "meeting": _cmd_meeting,
     }
 
     handler = _dispatch.get(args.command)
@@ -685,6 +836,25 @@ def _cmd_schema(subparsers: argparse._SubParsersAction, args: argparse.Namespace
             "commands": all_schemas,
             "capabilities": caps,
         }))
+
+
+def _cmd_status(args: argparse.Namespace) -> None:
+    """환경 진단 독립 실행 — preflight_check + capabilities를 JSON으로 출력."""
+    caps = check_capabilities()
+    diagnostics = preflight_check(args)
+
+    status_data: dict[str, Any] = {
+        "capabilities": caps,
+        "diagnostics": diagnostics["checks"],
+        "manual_steps": diagnostics["manual_steps"],
+        "passed": diagnostics["passed"],
+    }
+
+    is_json = getattr(args, "json_mode", False)
+    if is_json:
+        print(json_output("success", "status", data=status_data))
+    else:
+        print(_json.dumps(status_data, ensure_ascii=False, indent=2))
 
 
 def _cmd_dry_run(args: argparse.Namespace) -> None:
@@ -835,7 +1005,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
             total_speech_min=scan_result.get("total_speech_min"),
         )
     else:
-        print("[DB] video_id 추출 실패: 스캔 결과 저장 생략")
+        print("[DB] video_id 추출 실패: 스캔 결과 저장 생략", file=sys.stderr)
 
 
 def _cmd_smart(args: argparse.Namespace) -> None:
@@ -857,11 +1027,11 @@ def _cmd_smart(args: argparse.Namespace) -> None:
     profile = get_profile(video_id) if video_id else None
 
     # Phase 1: 스캔
-    print("=" * 60)
-    print("[Phase 1/3] 스트림 구간 스캔")
-    print("=" * 60)
+    print("=" * 60, file=sys.stderr)
+    print("[Phase 1/3] 스트림 구간 스캔", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
     if profile and profile.get("scan_result") and not args.force_scan:
-        print(f"[DB] 기존 스캔 결과 사용 ({video_id})")
+        print(f"[DB] 기존 스캔 결과 사용 ({video_id})", file=sys.stderr)
         scan_result = profile["scan_result"]
     else:
         scan_result = scan_stream(
@@ -877,34 +1047,34 @@ def _cmd_smart(args: argparse.Namespace) -> None:
 
     speech_ranges = scan_result.get("speech_ranges") or []
     if not speech_ranges:
-        print("[중단] 음성 구간을 찾지 못했습니다")
+        print("[중단] 음성 구간을 찾지 못했습니다", file=sys.stderr)
         return
 
     # Phase 2: 음성 블록만 병렬 다운로드
-    print()
-    print("=" * 60)
-    print("[Phase 2/3] 음성 블록 병렬 다운로드")
-    print("=" * 60)
+    print(file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    print("[Phase 2/3] 음성 블록 병렬 다운로드", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
     blocks = scan_result.get("blocks") or []
     audio_files = download_speech_blocks(
         args.url, blocks, audio_output,
     )
 
     if not audio_files:
-        print("[중단] 다운로드된 파일 없음")
+        print("[중단] 다운로드된 파일 없음", file=sys.stderr)
         return
 
     # Phase 3: 각 블록 변환 + 병합
-    print()
-    print("=" * 60)
-    print(f"[Phase 3/3] 변환 ({len(audio_files)}개 블록)")
-    print("=" * 60)
+    print(file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    print(f"[Phase 3/3] 변환 ({len(audio_files)}개 블록)", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
     all_segments = []
     cumulative_offset = 0.0
 
     for i, audio_path in enumerate(audio_files):
-        print(f"\n--- 블록 {i}/{len(audio_files) - 1}: {audio_path.name} ---")
+        print(f"\n--- 블록 {i}/{len(audio_files) - 1}: {audio_path.name} ---", file=sys.stderr)
         segments = transcribe_chunks(
             audio_path,
             chunk_minutes=10,
@@ -938,18 +1108,18 @@ def _cmd_smart(args: argparse.Namespace) -> None:
     if args.resume:
         save_transcript(all_segments, args.resume, fmt=args.fmt)
 
-    print(f"\n{'=' * 60}")
-    print(f"[완료] {len(all_segments)}개 세그먼트 → {transcript_path}")
+    print(f"\n{'=' * 60}", file=sys.stderr)
+    print(f"[완료] {len(all_segments)}개 세그먼트 → {transcript_path}", file=sys.stderr)
 
     # 오디오 파일 크기 합계
     total_mb = sum(f.stat().st_size for f in audio_files) / 1024 / 1024
-    print(f"[다운로드] 총 {total_mb:.0f}MB ({len(audio_files)}개 블록)")
-    print(f"[정리] 오디오 파일은 {audio_output}에 보존됨")
+    print(f"[다운로드] 총 {total_mb:.0f}MB ({len(audio_files)}개 블록)", file=sys.stderr)
+    print(f"[정리] 오디오 파일은 {audio_output}에 보존됨", file=sys.stderr)
 
     if video_id:
         captured_files = [str(path) for path in audio_files]
         update_captured(video_id, speech_ranges, captured_files)
-        print(f"[DB] 캡처 정보 갱신 완료 ({video_id})")
+        print(f"[DB] 캡처 정보 갱신 완료 ({video_id})", file=sys.stderr)
 
 
 def _cmd_profile(args: argparse.Namespace) -> None:
@@ -995,13 +1165,13 @@ def _cmd_live(args):
     # 자동 시작 지점 탐색: BGM 건너뛰기
     if args.auto_start and args.back == 0:
         from .probe import find_content_start
-        print("[자동 탐색] BGM 구간 건너뛰기...")
+        print("[자동 탐색] BGM 구간 건너뛰기...", file=sys.stderr)
         result = find_content_start(args.url)
         if result["status"] in ("found", "all_speech"):
             args.back = result["content_back"]
-            print(f"[자동 탐색] --back {args.back} 으로 설정")
+            print(f"[자동 탐색] --back {args.back} 으로 설정", file=sys.stderr)
         else:
-            print("[자동 탐색] 강의 시작 지점을 찾지 못함 — 현재 시점부터 녹음")
+            print("[자동 탐색] 강의 시작 지점을 찾지 못함 — 현재 시점부터 녹음", file=sys.stderr)
 
     # 연속 모드: 청크 단위 실시간 변환
     if args.continuous:
@@ -1022,9 +1192,9 @@ def _cmd_live(args):
     audio_path = output_dir / "live_audio.wav"
     transcript_path = output_dir / f"transcript.{args.fmt}"
 
-    print("=" * 60)
-    print(f"[1/2] 오디오 다운로드 ({args.duration}분, {args.back}분 전부터)")
-    print("=" * 60)
+    print("=" * 60, file=sys.stderr)
+    print(f"[1/2] 오디오 다운로드 ({args.duration}분, {args.back}분 전부터)", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
     download_live_audio(
         args.url,
         audio_path,
@@ -1032,10 +1202,10 @@ def _cmd_live(args):
         duration_minutes=args.duration,
     )
 
-    print()
-    print("=" * 60)
-    print("[2/2] 음성 인식")
-    print("=" * 60)
+    print(file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    print("[2/2] 음성 인식", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
     segments = transcribe_audio(
         audio_path,
@@ -1051,24 +1221,24 @@ def _cmd_live(args):
         existing = load_transcript(args.resume)
         if existing:
             segments = merge_transcripts(existing, segments)
-            print(f"[이어붙이기] {args.resume} 기반 병합 완료")
+            print(f"[이어붙이기] {args.resume} 기반 병합 완료", file=sys.stderr)
         # 병합 결과를 기존 파일에도 덮어쓰기
         save_transcript(segments, args.resume, fmt=args.fmt)
-        print(f"[저장] {args.resume} (병합본)")
+        print(f"[저장] {args.resume} (병합본)", file=sys.stderr)
 
     save_transcript(segments, transcript_path, fmt=args.fmt)
 
 
 def _cmd_download(args):
     """YouTube 라이브 오디오만 다운로드."""
-    print(f"[다운로드] {args.url} -> {args.output}")
+    print(f"[다운로드] {args.url} -> {args.output}", file=sys.stderr)
     download_live_audio(
         args.url,
         args.output,
         minutes_back=args.back,
         duration_minutes=args.duration,
     )
-    print(f"[완료] {args.output}")
+    print(f"[완료] {args.output}", file=sys.stderr)
 
 
 def _cmd_enroll(args):
@@ -1080,7 +1250,7 @@ def _cmd_enroll(args):
     if args.device is None:
         builtin = find_builtin_mic()
         if builtin is not None:
-            print(f"[자동 감지] 내장 마이크 사용: [{builtin}]")
+            print(f"[자동 감지] 내장 마이크 사용: [{builtin}]", file=sys.stderr)
             args.device = builtin
 
     profiles_path = Path(args.profiles)
@@ -1099,17 +1269,17 @@ def _cmd_enroll(args):
     # --delete: 화자 삭제
     if args.delete:
         if SpeakerDiarizer.delete_from_profiles(profiles_path, args.delete):
-            print(f"[삭제] '{args.delete}' 삭제 완료")
+            print(f"[삭제] '{args.delete}' 삭제 완료", file=sys.stderr)
         else:
-            print(f"[오류] '{args.delete}' 찾을 수 없음")
+            print(f"[오류] '{args.delete}' 찾을 수 없음", file=sys.stderr)
         return
 
     # 이름 필수 확인
     if not args.name:
-        print("[오류] 등록할 화자 이름을 지정하세요.")
-        print("  사용법: python -m src.cli enroll \"이름\"")
-        print("  목록:   python -m src.cli enroll --list")
-        return
+        print("[오류] 등록할 화자 이름을 지정하세요.", file=sys.stderr)
+        print("  사용법: python -m src.cli enroll \"이름\"", file=sys.stderr)
+        print("  목록:   python -m src.cli enroll --list", file=sys.stderr)
+        sys.exit(EXIT_ARG_ERROR)
 
     duration = max(args.duration, 5)  # 최소 5초
 
@@ -1119,12 +1289,12 @@ def _cmd_enroll(args):
     if args.name in existing_names:
         answer = input(f"'{args.name}' 이미 등록됨. 덮어쓸까요? (y/N): ").strip().lower()
         if answer != "y":
-            print("[취소]")
+            print("[취소]", file=sys.stderr)
             return
 
     # pyannote 모델 로드
     if not SpeakerDiarizer.is_available():
-        print("[오류] pyannote-audio 미설치. pip install pyannote-audio")
+        print("[오류] pyannote-audio 미설치. pip install pyannote-audio", file=sys.stderr)
         return
 
     if args.cpu:
@@ -1133,18 +1303,18 @@ def _cmd_enroll(args):
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"[모델] pyannote 임베딩 모델 로드 중 ({device})...")
+    print(f"[모델] pyannote 임베딩 모델 로드 중 ({device})...", file=sys.stderr)
     diarizer = SpeakerDiarizer(hf_token=os.getenv("HF_TOKEN"), device=device)
-    print("[모델] 로드 완료")
+    print("[모델] 로드 완료", file=sys.stderr)
 
     # 녹음
-    print(f"\n{'=' * 50}")
-    print(f"  '{args.name}' 목소리 등록 — {duration}초 녹음")
-    print("  녹음 시작 후 자연스럽게 말해주세요.")
-    print(f"{'=' * 50}")
+    print(f"\n{'=' * 50}", file=sys.stderr)
+    print(f"  '{args.name}' 목소리 등록 — {duration}초 녹음", file=sys.stderr)
+    print("  녹음 시작 후 자연스럽게 말해주세요.", file=sys.stderr)
+    print(f"{'=' * 50}", file=sys.stderr)
     input("Enter를 눌러 녹음 시작...")
 
-    print(f"\n[녹음 중] {duration}초...")
+    print(f"\n[녹음 중] {duration}초...", file=sys.stderr)
     chunks = []
     recorded = 0.0
     for chunk in capture_audio(chunk_seconds=1.0, device=args.device):
@@ -1152,53 +1322,23 @@ def _cmd_enroll(args):
         recorded += 1.0
         remaining = duration - recorded
         if remaining > 0:
-            print(f"  {remaining:.0f}초 남음...", end="\r")
+            print(f"  {remaining:.0f}초 남음...", end="\r", file=sys.stderr)
         if recorded >= duration:
             break
 
     audio = np.concatenate(chunks)
-    print(f"\n[녹음 완료] {recorded:.0f}초, {len(audio)} 샘플")
+    print(f"\n[녹음 완료] {recorded:.0f}초, {len(audio)} 샘플", file=sys.stderr)
 
     # 임베딩 추출 + 등록
-    print("[등록] 임베딩 추출 중...")
+    print("[등록] 임베딩 추출 중...", file=sys.stderr)
     diarizer.enroll(args.name, audio, SAMPLE_RATE)
 
     # 저장
     diarizer.save_profiles(profiles_path)
-    print(f"[저장] {profiles_path}")
-    print(f"[완료] '{args.name}' 등록 성공!")
-    print("\n회의에서 사용:")
-    print(f"  python -m src.cli meeting --profiles {profiles_path}")
-
-
-def _cmd_approve_profiles_pending(args):
-    """승인 대기 프로필 스냅샷을 실제 profiles 파일에 반영한다."""
-    import json
-
-    pending_path = Path(args.pending)
-    profiles_path = Path(args.profiles)
-    if not pending_path.exists():
-        print(f"[오류] 승인 대기 파일 없음: {pending_path}")
-        return
-
-    try:
-        payload = json.loads(pending_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"[오류] 승인 대기 파일 파싱 실패: {e}")
-        return
-
-    speakers = payload.get("speakers")
-    if not isinstance(speakers, dict) or not speakers:
-        print("[오류] 승인 대기 파일에 화자 정보가 없습니다.")
-        return
-
-    profiles_path.parent.mkdir(parents=True, exist_ok=True)
-    profiles_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    print(f"[승인] {pending_path} -> {profiles_path}")
-    print(f"[완료] {len(speakers)}명 프로필 반영")
+    print(f"[저장] {profiles_path}", file=sys.stderr)
+    print(f"[완료] '{args.name}' 등록 성공!", file=sys.stderr)
+    print("\n회의에서 사용:", file=sys.stderr)
+    print(f"  python -m src.cli meeting --profiles {profiles_path}", file=sys.stderr)
 
 
 class StreamingAGC:
@@ -1313,9 +1453,9 @@ def _cmd_approve_profiles(args):
     review["backup_path"] = str(backup_path) if backup_path.exists() else ""
     review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"[프로필 승인] {target_path}")
+    print(f"[프로필 승인] {target_path}", file=sys.stderr)
     if backup_path.exists():
-        print(f"[백업] {backup_path}")
+        print(f"[백업] {backup_path}", file=sys.stderr)
 
 
 def _mean_word_probability(seg: dict) -> float:
@@ -1427,12 +1567,12 @@ def _collect_live_corrections(
         for future, original_batch in correction_futures:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                print("[후처리] 실시간 교정 정리 시간 초과, 남은 배치는 건너뜁니다.")
+                print("[후처리] 실시간 교정 정리 시간 초과, 남은 배치는 건너뜁니다.", file=sys.stderr)
                 break
             try:
                 _, ok, corrected = future.result(timeout=remaining)
             except TimeoutError:
-                print("[후처리] 실시간 교정 정리 시간 초과, 남은 배치는 건너뜁니다.")
+                print("[후처리] 실시간 교정 정리 시간 초과, 남은 배치는 건너뜁니다.", file=sys.stderr)
                 break
             except Exception:
                 continue
@@ -1454,7 +1594,7 @@ def _cmd_meeting(args):
     if args.list_devices:
         devices = list_audio_devices()
         if not devices:
-            print("[오류] 사용 가능한 오디오 입력 장치가 없습니다.")
+            print("[오류] 사용 가능한 오디오 입력 장치가 없습니다.", file=sys.stderr)
             return
         print("사용 가능한 오디오 입력 장치:")
         for dev in devices:
@@ -1468,7 +1608,7 @@ def _cmd_meeting(args):
     if args.device is None:
         builtin = find_builtin_mic()
         if builtin is not None:
-            print(f"[자동 감지] 내장 마이크 사용: [{builtin}]")
+            print(f"[자동 감지] 내장 마이크 사용: [{builtin}]", file=sys.stderr)
             args.device = builtin
 
     import threading
@@ -1506,7 +1646,7 @@ def _cmd_meeting(args):
     # SSE 서버 시작 (데몬 스레드)
     set_current_audio_device(args.device)
     set_startup_status("booting", "로컬 UI 시작 중...")
-    print(f"[서버] http://localhost:{args.port} 시작 중...")
+    print(f"[서버] http://localhost:{args.port} 시작 중...", file=sys.stderr)
     server_thread = threading.Thread(
         target=run_server, args=("127.0.0.1", args.port), daemon=True,
     )
@@ -1521,7 +1661,7 @@ def _cmd_meeting(args):
     # 파일 저장
     writer = MeetingWriter(output_path=args.output)
     writer.write_header()
-    print(f"[저장] {writer.output_path}")
+    print(f"[저장] {writer.output_path}", file=sys.stderr)
 
     pending_profiles_path = writer.output_path.with_suffix(".profiles.pending.json")
     audio_offset_seconds = 0.0
@@ -1535,7 +1675,7 @@ def _cmd_meeting(args):
 
     # Whisper 워커 프로세스 시작 (비동기 — 캡처와 병렬 로드)
     set_startup_status("loading_asr", f"STT 모델 로드 중 ({device}/{compute_type})...")
-    print(f"[모델] {args.model} 로드 중 ({device}/{compute_type})...")
+    print(f"[모델] {args.model} 로드 중 ({device}/{compute_type})...", file=sys.stderr)
     worker = WhisperWorker(
         model_id=args.model,
         language=args.language,
@@ -1552,7 +1692,7 @@ def _cmd_meeting(args):
         from .diarize import SpeakerDiarizer
         if SpeakerDiarizer.is_available():
             set_startup_status("loading_diarizer", "화자 분리 모델 로드 중...")
-            print("[화자 분리] pyannote 모델 로드 중...")
+            print("[화자 분리] pyannote 모델 로드 중...", file=sys.stderr)
             try:
                 profiles_path = getattr(args, "profiles", None)
                 diarizer = SpeakerDiarizer(
@@ -1565,16 +1705,16 @@ def _cmd_meeting(args):
                 if device == "cuda":
                     from .transcribe import _register_cuda_exit_guard
                     _register_cuda_exit_guard()
-                print("[화자 분리] 로드 완료")
+                print("[화자 분리] 로드 완료", file=sys.stderr)
                 if profiles_path:
                     names = list(diarizer._enrolled_names)
-                    print(f"[화자 분리] 프로필 모드: {', '.join(names)} ({len(names)}명)")
+                    print(f"[화자 분리] 프로필 모드: {', '.join(names)} ({len(names)}명)", file=sys.stderr)
             except Exception as e:
-                print(f"[화자 분리] 로드 실패: {e}")
-                print("[화자 분리] 화자 분리 없이 진행합니다.")
+                print(f"[화자 분리] 로드 실패: {e}", file=sys.stderr)
+                print("[화자 분리] 화자 분리 없이 진행합니다.", file=sys.stderr)
         else:
-            print("[화자 분리] pyannote-audio 미설치 — 화자 분리 비활성화")
-            print("[화자 분리] 설치: pip install 'media-transcriber[diarize]'")
+            print("[화자 분리] pyannote-audio 미설치 — 화자 분리 비활성화", file=sys.stderr)
+            print("[화자 분리] 설치: pip install 'media-transcriber[diarize]'", file=sys.stderr)
 
     # diarizer를 서버에 연결 (웹 UI 화자 등록용)
     profiles_path = getattr(args, "profiles", None)
@@ -1600,7 +1740,7 @@ def _cmd_meeting(args):
             on_shutdown=_shutdown_from_tray,
         )
         tray.start()
-        print("[트레이] 시스템 트레이 아이콘 활성화")
+        print("[트레이] 시스템 트레이 아이콘 활성화", file=sys.stderr)
 
     def _build_dynamic_domain_hint() -> str:
         """기본 도메인 힌트 + 웹 UI에서 추가한 동적 키워드 결합."""
@@ -1629,13 +1769,13 @@ def _cmd_meeting(args):
     # 실시간 처리 루프
     _model_announced = False
     if worker.is_ready:
-        print("[모델] 로드 완료")
+        print("[모델] 로드 완료", file=sys.stderr)
         _model_announced = True
     _audio_prefetch_buffer: list[np.ndarray] = []  # 모델 로드 중 오디오 선캡처 버퍼
 
-    print(f"[캡처] 마이크 캡처 시작 (청크={args.chunk}초)")
-    print("[캡처] Ctrl+C로 종료")
-    print("=" * 60)
+    print(f"[캡처] 마이크 캡처 시작 (청크={args.chunk}초)", file=sys.stderr)
+    print("[캡처] Ctrl+C로 종료", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
     start_time = time.time()
     segment_count = 0
@@ -1664,7 +1804,7 @@ def _cmd_meeting(args):
         elif _ollama_ok(_ollama_model):
             _use_ollama = True
             _has_backend = True
-            print(f"[후처리] Codex 미설치 → Ollama ({_ollama_model}) 폴백")
+            print(f"[후처리] Codex 미설치 → Ollama ({_ollama_model}) 폴백", file=sys.stderr)
         if _has_backend:
             from concurrent.futures import ThreadPoolExecutor as _TPE
             _polish_pool = _TPE(max_workers=2, thread_name_prefix="live-polish")
@@ -1720,7 +1860,7 @@ def _cmd_meeting(args):
                         # MeetingWriter 교체 (새 세션 디렉토리)
                         writer = MeetingWriter(output_path=args.output)
                         writer.write_header()
-                        print(f"\n[새 세션] {writer.output_path}")
+                        print(f"\n[새 세션] {writer.output_path}", file=sys.stderr)
 
                         # 상태 리셋
                         segment_count = 0
@@ -1738,12 +1878,12 @@ def _cmd_meeting(args):
                         # pending_profiles 경로 갱신
                         pending_profiles_path = writer.output_path.with_suffix(".profiles.pending.json")
 
-                        print("[새 세션] 녹음 계속 중 (모델 유지)")
+                        print("[새 세션] 녹음 계속 중 (모델 유지)", file=sys.stderr)
                         continue
 
                     # 웹 UI에서 종료 요청 시 graceful shutdown
                     if is_shutdown_requested():
-                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청")
+                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
                         break
 
                     # 일시정지 상태면 STT 건너뛰기 (캡처는 계속)
@@ -1768,14 +1908,14 @@ def _cmd_meeting(args):
 
                     # 모델 준비 완료 알림 (최초 1회)
                     if not _model_announced:
-                        print("[모델] 로드 완료")
+                        print("[모델] 로드 완료", file=sys.stderr)
                         _model_announced = True
                         set_startup_status("ready", "녹음 준비 완료", ready=True)
 
                     # 선캡처 버퍼 소진: 현재 청크와 합쳐서 한 번에 전사
                     if _audio_prefetch_buffer:
                         _buf_count = len(_audio_prefetch_buffer)
-                        print(f"[선캡처] 버퍼된 {_buf_count}청크를 현재 청크에 병합")
+                        print(f"[선캡처] 버퍼된 {_buf_count}청크를 현재 청크에 병합", file=sys.stderr)
                         _audio_prefetch_buffer.append(chunk)
                         chunk = np.concatenate(_audio_prefetch_buffer)
                         _audio_prefetch_buffer.clear()
@@ -1822,7 +1962,7 @@ def _cmd_meeting(args):
 
                     # STT 후 종료 재확인 (transcribe 블로킹 동안 요청됐을 수 있음)
                     if is_shutdown_requested():
-                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청")
+                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
                         break
 
                     # 화자 분리: 청크 내 구간별 화자 감지 (세그먼테이션 기반)
@@ -1832,13 +1972,13 @@ def _cmd_meeting(args):
                             speaker_segments = diarizer.identify_speakers_in_chunk(chunk)
                         except Exception as e:
                             if not _diarize_warned:
-                                print(f"[화자 분리] 세그먼테이션 실패: {e}")
-                                print("[화자 분리] 전체 청크 방식으로 폴백합니다.")
+                                print(f"[화자 분리] 세그먼테이션 실패: {e}", file=sys.stderr)
+                                print("[화자 분리] 전체 청크 방식으로 폴백합니다.", file=sys.stderr)
                                 _diarize_warned = True
 
                     # 화자 분리 후 종료 재확인
                     if is_shutdown_requested():
-                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청")
+                        print("\n[종료 요청] 웹 UI에서 저장 & 종료 요청", file=sys.stderr)
                         break
 
                     raw_segments = []
@@ -1978,10 +2118,11 @@ def _cmd_meeting(args):
                                     extracted = payload.get("extracted") or []
                                     if kws:
                                         print(
-                                            f"[키워드 추출] promoted={len(promoted)} extracted={len(extracted)}"
+                                            f"[키워드 추출] promoted={len(promoted)} extracted={len(extracted)}",
+                                            file=sys.stderr,
                                         )
                                 except Exception as e:
-                                    print(f"[키워드 추출] 실패: {e}")
+                                    print(f"[키워드 추출] 실패: {e}", file=sys.stderr)
 
                             _polish_pool.submit(_do_kw_extract)
 
@@ -2004,11 +2145,13 @@ def _cmd_meeting(args):
                 if _active_input_device != _fallback_input_device:
                     print(
                         "[마이크] 장치 전환 실패:"
-                        f" {_format_input_device(_active_input_device)} ({e})"
+                        f" {_format_input_device(_active_input_device)} ({e})",
+                        file=sys.stderr,
                     )
                     print(
                         "[마이크] 이전 장치로 복귀:"
-                        f" {_format_input_device(_fallback_input_device)}"
+                        f" {_format_input_device(_fallback_input_device)}",
+                        file=sys.stderr,
                     )
                     _active_input_device = _fallback_input_device
                     set_current_audio_device(
@@ -2025,7 +2168,8 @@ def _cmd_meeting(args):
                 print(
                     "[마이크] 입력 장치 전환:"
                     f" {_format_input_device(_active_input_device)}"
-                    f" -> {_format_input_device(requested_input_device)}"
+                    f" -> {_format_input_device(requested_input_device)}",
+                    file=sys.stderr,
                 )
                 _fallback_input_device = _active_input_device
                 _active_input_device = requested_input_device
@@ -2042,8 +2186,8 @@ def _cmd_meeting(args):
     worker.stop()
 
     # 종료 처리
-    print(f"\n{'=' * 60}")
-    print("[종료] 저장 중...")
+    print(f"\n{'=' * 60}", file=sys.stderr)
+    print("[종료] 저장 중...", file=sys.stderr)
     set_postprocess_status("saving")
 
     duration = time.time() - start_time
@@ -2072,9 +2216,9 @@ def _cmd_meeting(args):
                     "note": "이번 회의 라벨 검토 후 승인된 경우에만 profiles_source로 반영하세요.",
                 }
             )
-            print(f"[프로필 검토] 승인 대기 파일 생성: {pending_profiles_path}")
+            print(f"[프로필 검토] 승인 대기 파일 생성: {pending_profiles_path}", file=sys.stderr)
         except Exception as e:
-            print(f"[프로필 검토] 승인 대기 파일 생성 실패: {e}")
+            print(f"[프로필 검토] 승인 대기 파일 생성 실패: {e}", file=sys.stderr)
 
     writer.write_footer(duration_str, segment_count, speaker_count)
     try:
@@ -2083,7 +2227,7 @@ def _cmd_meeting(args):
             corrected_count = writer.apply_segment_corrections(_corrected_map)
             if corrected_count:
                 writer.write_footer(duration_str, segment_count, speaker_count)
-                print(f"[실시간 교정] {corrected_count}줄 사전 교정 적용")
+                print(f"[실시간 교정] {corrected_count}줄 사전 교정 적용", file=sys.stderr)
     finally:
         writer.close()
 
@@ -2101,10 +2245,10 @@ def _cmd_meeting(args):
         if is_codex_available() or is_gemini_available() or is_ollama_available(_ollama_model):
             import multiprocessing
 
-            print()
-            print("=" * 60)
-            print("[후처리] LLM 후처리")
-            print("=" * 60)
+            print(file=sys.stderr)
+            print("=" * 60, file=sys.stderr)
+            print("[후처리] LLM 후처리", file=sys.stderr)
+            print("=" * 60, file=sys.stderr)
 
             try:
                 _status_file = str(writer.output_path.with_suffix(".postprocess-status.json"))
@@ -2122,20 +2266,20 @@ def _cmd_meeting(args):
                 proc.start()
                 from .server import set_postprocess_status_file
                 set_postprocess_status_file(_status_file)
-                print(f"[후처리] 백그라운드 실행 중 (PID: {proc.pid})")
-                print("[후처리] 터미널을 닫아도 후처리는 계속됩니다.")
+                print(f"[후처리] 백그라운드 실행 중 (PID: {proc.pid})", file=sys.stderr)
+                print("[후처리] 터미널을 닫아도 후처리는 계속됩니다.", file=sys.stderr)
             except KeyboardInterrupt:
-                print("[후처리] 사용자 중단 — 현재까지 저장된 회의록은 유지합니다.")
+                print("[후처리] 사용자 중단 — 현재까지 저장된 회의록은 유지합니다.", file=sys.stderr)
             except Exception as e:
-                print(f"[후처리] 실패: {e}")
+                print(f"[후처리] 실패: {e}", file=sys.stderr)
             else:
                 launched_postprocess = True
                 set_postprocess_status("queued", 0)
 
     if not launched_postprocess:
         set_postprocess_status("done", 100)
-    print(f"[저장] {writer.output_path}")
-    print(f"[완료] {segment_count}개 세그먼트 | {duration_str} | 화자 {speaker_count}명")
+    print(f"[저장] {writer.output_path}", file=sys.stderr)
+    print(f"[완료] {segment_count}개 세그먼트 | {duration_str} | 화자 {speaker_count}명", file=sys.stderr)
 
     # 완료 후 출력 폴더 열기 (Windows)
     if sys.platform == "win32":

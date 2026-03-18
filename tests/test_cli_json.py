@@ -60,7 +60,7 @@ def test_schema_subcommand_outputs_all_command_schemas(
     assert payload["status"] == "success"
     assert payload["command"] == "schema"
     commands = payload["data"]["commands"]
-    assert {"transcribe", "live", "download", "probe", "scan", "smart", "profile", "enroll", "meeting", "approve-profiles"} <= set(commands)
+    assert {"transcribe", "live", "download", "probe", "scan", "smart", "profile", "enroll", "meeting", "approve-profiles", "status", "auto", "detect", "map", "approve"} <= set(commands)
 
 
 def test_schema_specific_command_outputs_single_schema(
@@ -477,3 +477,145 @@ def test_ndjson_line_with_special_chars() -> None:
     line = cli._ndjson_line("test", text='he said "hello" \\ world')
     parsed = json.loads(line)
     assert parsed["text"] == 'he said "hello" \\ world'
+
+
+# ===================================================================
+# Issue 1: json_output reason enum 테스트
+# ===================================================================
+
+
+def test_json_output_error_includes_reason_enum() -> None:
+    """에러 출력에 reason enum이 포함되는지 검증."""
+    output = cli.json_output("error", "transcribe", error="파일 없음", code="NOT_FOUND")
+    payload = json.loads(output)
+    assert payload["reason"] == "notFound"
+
+
+def test_json_output_error_reason_maps_all_codes() -> None:
+    """모든 code → reason 매핑이 올바른지 검증."""
+    mappings = {
+        "ERROR": "runtimeError",
+        "ARG_ERROR": "argError",
+        "MODEL_ERROR": "modelError",
+        "NOT_FOUND": "notFound",
+        "PREFLIGHT_FAIL": "preflightFail",
+    }
+    for code, expected_reason in mappings.items():
+        output = cli.json_output("error", "test", error="msg", code=code)
+        payload = json.loads(output)
+        assert payload["reason"] == expected_reason, f"code={code}"
+
+
+def test_json_output_error_without_code_defaults_to_runtime_error() -> None:
+    """code 없는 에러 시 reason이 runtimeError로 기본값."""
+    output = cli.json_output("error", "test", error="알 수 없는 오류")
+    payload = json.loads(output)
+    assert payload["reason"] == "runtimeError"
+
+
+def test_json_output_success_has_no_reason() -> None:
+    """성공 출력에는 reason이 없어야 한다."""
+    output = cli.json_output("success", "test", data={"key": "value"})
+    payload = json.loads(output)
+    assert "reason" not in payload
+
+
+def test_preflight_fail_json_includes_reason(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """preflight 실패 시 JSON 출력에 reason=preflightFail 포함."""
+    import shutil as _shutil
+    monkeypatch.setattr(_shutil, "which", lambda x: None)
+    with patch.object(sys, "argv", ["media-transcriber", "--json", "live", "https://youtube.com/watch?v=test"]):
+        with pytest.raises(SystemExit):
+            cli.main()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == "preflightFail"
+
+
+# ===================================================================
+# Issue 2: schema 의존성 정보 테스트
+# ===================================================================
+
+
+def test_schema_live_includes_dependencies(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """live 서브커맨드 schema에 dependencies가 포함되는지 검증."""
+    payload = _run_cli(["schema", "live"], capsys)
+    assert payload["status"] == "success"
+    deps = payload["data"]["dependencies"]
+    dep_names = {d["name"] for d in deps}
+    assert "ffmpeg" in dep_names
+    assert "yt-dlp" in dep_names
+
+
+def test_schema_transcribe_includes_gpu_dependency(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """transcribe schema에 GPU/CUDA 의존성이 포함되는지 검증."""
+    payload = _run_cli(["schema", "transcribe"], capsys)
+    deps = payload["data"].get("dependencies", [])
+    dep_names = {d["name"] for d in deps}
+    assert "GPU/CUDA" in dep_names
+
+
+def test_schema_all_commands_includes_dependencies(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """전체 schema에서 live 커맨드에 dependencies가 포함되는지 검증."""
+    payload = _run_cli(["schema"], capsys)
+    live_schema = payload["data"]["commands"]["live"]
+    assert "dependencies" in live_schema
+    dep_names = {d["name"] for d in live_schema["dependencies"]}
+    assert "ffmpeg" in dep_names
+
+
+def test_schema_profile_has_no_dependencies(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """의존성 없는 서브커맨드(profile)에는 dependencies 키가 없다."""
+    payload = _run_cli(["schema", "profile"], capsys)
+    assert "dependencies" not in payload["data"]
+
+
+# ===================================================================
+# Issue 3: status 서브커맨드 테스트
+# ===================================================================
+
+
+def test_status_subcommand_outputs_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """status --json이 capabilities/diagnostics를 포함하는 JSON을 출력."""
+    payload = _run_cli(["--json", "status"], capsys)
+    assert payload["status"] == "success"
+    assert payload["command"] == "status"
+    data = payload["data"]
+    assert "capabilities" in data
+    assert "diagnostics" in data
+    assert "manual_steps" in data
+    assert "passed" in data
+
+
+def test_status_subcommand_plain_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """status (--json 없이)가 유효한 JSON을 출력."""
+    with patch.object(sys, "argv", ["media-transcriber", "status"]):
+        cli.main()
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert "capabilities" in parsed
+    assert "passed" in parsed
+
+
+def test_status_capabilities_contain_expected_keys(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """status 출력의 capabilities에 필수 키가 모두 존재."""
+    payload = _run_cli(["--json", "status"], capsys)
+    caps = payload["data"]["capabilities"]
+    expected = {"cuda_available", "ffmpeg_available", "diarize_available", "yt_dlp_available", "ollama_available", "tray_available"}
+    assert expected <= set(caps)

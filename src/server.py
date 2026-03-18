@@ -5,8 +5,10 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from collections.abc import Callable
 from datetime import datetime
@@ -14,16 +16,25 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .paths import OUTPUT_ROOT
 
+# --- 보안 하드닝 상수 ---
+MAX_WS_CONNECTIONS = 50  # WebSocket 최대 동시 연결 수
+MAX_WS_MESSAGE_SIZE = 65536  # WebSocket 메시지 최대 크기 (바이트)
+MAX_TRANSCRIPT_HISTORY = 10000  # 전사 내역 최대 세그먼트 수
+
 # SSE 브로드캐스트 — 클라이언트별 큐
 _client_queues: set[asyncio.Queue[dict]] = set()
 
-# 전사 내역 누적 (새로고침 시 제공용)
-_transcript_history: list[dict] = []
+# WebSocket 연결 관리
+_connected_websockets: set[WebSocket] = set()
+
+# 전사 내역 누적 (새로고침 시 제공용, 최대 세그먼트 수 제한)
+_transcript_history: deque[dict] = deque(maxlen=MAX_TRANSCRIPT_HISTORY)
 
 # 서버 시작 시각 (경과시간 계산용)
 _start_time: float = 0.0
@@ -42,6 +53,7 @@ _postprocess_phase: str = ""
 _postprocess_progress: float = 0.0
 _diarizer = None  # SpeakerDiarizer 참조 (cli.py에서 설정)
 _profiles_path: str | None = None
+_profiles_lock = asyncio.Lock()  # 프로필 읽기/쓰기 동시성 보호
 _api_key: str = (os.getenv("MEETING_API_KEY") or "").strip()
 _audio_device_lock = threading.Lock()
 _current_audio_device: int | None = None
@@ -63,14 +75,143 @@ _SESSION_ID_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}")
 _SESSION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SESSION_TIME_RE = re.compile(r"\d{6}")
 
+# 자동 등록 후보 판별에 필요한 최소 세그먼트 수
+_AUTO_REGISTER_MIN_SEGMENTS = 5
+
+
+class UnknownSpeakerTracker:
+    """미등록 화자 추적기 — 프로필에 없는 화자의 임베딩을 누적하고 자동 등록 후보를 관리한다.
+
+    임베딩이 기존 프로필 모두와 유사도 임계값 미만이면 미등록 화자로 판별하고,
+    같은 화자의 세그먼트 임베딩을 평균하여 임시 저장한다.
+    _AUTO_REGISTER_MIN_SEGMENTS 이상 누적되면 자동 등록 후보로 마킹한다.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # speaker_id → {"embeddings": list[list[float]], "mean": list[float],
+        #               "first_seen": str, "last_seen": str, "candidate": bool}
+        self._unknown: dict[str, dict] = {}
+        self._next_id: int = 1
+
+    def track(self, embedding: list[float], threshold: float = 0.70) -> str | None:
+        """임베딩을 기존 프로필과 비교하고, 미등록이면 추적에 추가한다.
+
+        Args:
+            embedding: 화자 임베딩 벡터
+            threshold: 프로필 매칭 임계값
+
+        Returns:
+            미등록 화자 ID (기존 프로필과 매칭되면 None)
+        """
+        if not embedding or _diarizer is None:
+            return None
+
+        import numpy as np
+
+        # 기존 프로필과 매칭 시도
+        matched, _ = _find_matching_profile(embedding, threshold=threshold)
+        if matched is not None:
+            return None
+
+        target = np.array(embedding, dtype=np.float32)
+        now = datetime.now().isoformat()
+
+        with self._lock:
+            # 기존 미등록 화자 중 가장 유사한 것과 매칭
+            best_id: str | None = None
+            best_sim: float = 0.0
+            for uid, info in self._unknown.items():
+                known = np.array(info["mean"], dtype=np.float32)
+                sim = float(_diarizer._cosine_similarity(target, known))
+                if sim > best_sim:
+                    best_sim = sim
+                    best_id = uid
+
+            if best_id is not None and best_sim >= threshold:
+                # 기존 미등록 화자에 임베딩 누적
+                info = self._unknown[best_id]
+                info["embeddings"].append(embedding)
+                # 평균 재계산
+                arr = np.array(info["embeddings"], dtype=np.float32)
+                info["mean"] = np.mean(arr, axis=0).tolist()
+                info["last_seen"] = now
+                if len(info["embeddings"]) >= _AUTO_REGISTER_MIN_SEGMENTS:
+                    info["candidate"] = True
+                return best_id
+
+            # 새 미등록 화자 생성
+            new_id = f"unknown_{self._next_id}"
+            self._next_id += 1
+            self._unknown[new_id] = {
+                "embeddings": [embedding],
+                "mean": embedding,
+                "first_seen": now,
+                "last_seen": now,
+                "candidate": False,
+            }
+            return new_id
+
+    def list_unknown(self) -> list[dict]:
+        """미등록 화자 목록 반환."""
+        with self._lock:
+            result = []
+            for uid, info in self._unknown.items():
+                result.append({
+                    "id": uid,
+                    "segment_count": len(info["embeddings"]),
+                    "first_seen": info["first_seen"],
+                    "last_seen": info["last_seen"],
+                    "candidate": info["candidate"],
+                })
+            return result
+
+    def get(self, speaker_id: str) -> dict | None:
+        """특정 미등록 화자 정보 반환."""
+        with self._lock:
+            return self._unknown.get(speaker_id)
+
+    def remove(self, speaker_id: str) -> bool:
+        """미등록 화자 삭제. 성공 시 True."""
+        with self._lock:
+            return self._unknown.pop(speaker_id, None) is not None
+
+    def reset(self) -> None:
+        """모든 미등록 화자 데이터 초기화."""
+        with self._lock:
+            self._unknown.clear()
+            self._next_id = 1
+
+
+# 모듈 레벨 미등록 화자 추적기 인스턴스
+_unknown_tracker = UnknownSpeakerTracker()
+
 
 async def _broadcast_item(item: dict) -> None:
-    """모든 연결된 SSE 클라이언트에 이벤트 아이템을 전송한다."""
+    """모든 연결된 SSE + WebSocket 클라이언트에 이벤트 아이템을 전송한다."""
+    # SSE 클라이언트
     for q in list(_client_queues):
         try:
             q.put_nowait(item)
         except asyncio.QueueFull:
             pass
+
+    # WebSocket 클라이언트
+    if _connected_websockets:
+        # SSE 이벤트 타입이 있으면 type 필드 추가, 없으면 transcript 타입
+        if "_type" in item:
+            ws_payload = {"type": item["_type"], **item.get("_payload", {})}
+        else:
+            ws_payload = {"type": "transcript", **item}
+        message = json.dumps(ws_payload, ensure_ascii=False)
+        dead: list[WebSocket] = []
+        for ws in list(_connected_websockets):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            _connected_websockets.discard(ws)
 
 
 async def _broadcast_sse(event_type: str, payload: dict) -> None:
@@ -412,10 +553,128 @@ async def stream(request: Request) -> StreamingResponse:
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
 
 
+@app.websocket("/ws/transcribe")
+async def ws_transcribe(websocket: WebSocket) -> None:
+    """WebSocket 엔드포인트 — 전사 세그먼트 실시간 양방향 통신.
+
+    서버→클라이언트: 전사/교정/세션 이벤트 (SSE와 동일 데이터)
+    클라이언트→서버: JSON 메시지 (type: edit_speaker, edit_segment, search, ping)
+    하트비트: 30초 ping/pong
+    """
+    # API 키 인증 (쿼리 파라미터 또는 헤더)
+    if _api_key:
+        query_key = websocket.query_params.get("api_key", "")
+        header_key = (websocket.headers.get("x-api-key") or "").strip()
+        if query_key != _api_key and header_key != _api_key:
+            await websocket.close(code=4003, reason="인증 실패")
+            return
+
+    # 최대 연결 수 제한
+    if len(_connected_websockets) >= MAX_WS_CONNECTIONS:
+        await websocket.close(code=4008, reason="연결 수 초과")
+        return
+
+    await websocket.accept()
+    _connected_websockets.add(websocket)
+
+    # 연결 시 기존 전사 내역 전송 (최근 1000개만)
+    MAX_WS_INITIAL_HISTORY = 1000
+    try:
+        for item in list(_transcript_history)[-MAX_WS_INITIAL_HISTORY:]:
+            msg = json.dumps({"type": "transcript", **item}, ensure_ascii=False)
+            await websocket.send_text(msg)
+    except Exception:
+        _connected_websockets.discard(websocket)
+        return
+
+    # 하트비트 태스크
+    async def _heartbeat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(30)
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_json({"type": "ping", "ts": time.time()})
+        except Exception:
+            pass
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # 메시지 크기 제한
+            if len(data) > MAX_WS_MESSAGE_SIZE:
+                await websocket.send_json({"type": "error", "message": "메시지 크기 초과"})
+                continue
+            try:
+                msg = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                await websocket.send_json({"type": "error", "message": "잘못된 JSON 형식"})
+                continue
+
+            msg_type = msg.get("type", "")
+
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong", "ts": time.time()})
+
+            elif msg_type == "pong":
+                # 클라이언트 pong 응답 — 무시
+                pass
+
+            elif msg_type == "edit_speaker":
+                # 화자 이름 수정: {type: "edit_speaker", index: N, speaker: "새이름"}
+                index = msg.get("index")
+                new_speaker = msg.get("speaker", "").strip()
+                if isinstance(index, int) and 0 <= index < len(_transcript_history) and new_speaker:
+                    _transcript_history[index]["speaker"] = new_speaker
+                    _speakers.add(new_speaker)
+                    await _broadcast_sse("speaker_edited", {
+                        "index": index,
+                        "speaker": new_speaker,
+                    })
+
+            elif msg_type == "edit_segment":
+                # 세그먼트 텍스트 수정: {type: "edit_segment", index: N, text: "수정 텍스트"}
+                index = msg.get("index")
+                new_text = msg.get("text", "").strip()
+                if isinstance(index, int) and 0 <= index < len(_transcript_history) and new_text:
+                    _transcript_history[index]["text"] = new_text
+                    await _broadcast_sse("segment_edited", {
+                        "index": index,
+                        "text": new_text,
+                    })
+
+            elif msg_type == "search":
+                # 전사 내역 검색: {type: "search", query: "검색어"}
+                query = msg.get("query", "").strip().lower()
+                if query:
+                    results = []
+                    for i, item in enumerate(_transcript_history):
+                        if query in item.get("text", "").lower() or query in item.get("speaker", "").lower():
+                            results.append({"index": i, **item})
+                    await websocket.send_json({
+                        "type": "search_result",
+                        "query": query,
+                        "results": results,
+                        "count": len(results),
+                    })
+
+            else:
+                await websocket.send_json({"type": "error", "message": f"알 수 없는 메시지 타입: {msg_type}"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        heartbeat_task.cancel()
+        _connected_websockets.discard(websocket)
+
+
 @app.get("/history")
 async def history() -> list[dict]:
     """현재 세션의 전체 전사 내역 반환."""
-    return _transcript_history
+    return list(_transcript_history)
 
 
 @app.get("/status")
@@ -832,6 +1091,118 @@ async def delete_session(request: Request, session_id: str) -> dict:
     return {"deleted": True, "session_id": session_id}
 
 
+@app.get("/api/sessions/{session_id}/search")
+async def search_session(
+    request: Request,
+    session_id: str,
+    query: str = Query(..., description="검색어"),
+    speaker: str | None = Query(None, description="화자 필터"),
+    time_start: float | None = Query(None, description="시작 시간(초)"),
+    time_end: float | None = Query(None, description="종료 시간(초)"),
+    regex: bool = Query(False, description="정규식 모드"),
+) -> dict:
+    """세션 전사 내용에서 검색 필터 조합 + 정규식 검색.
+
+    query, speaker, time_start, time_end를 AND 조건으로 필터링한다.
+    regex=true이면 query를 정규식 패턴으로 처리한다.
+    """
+    _verify_api_key(request)
+
+    session_dir, _ = _resolve_session_dir(session_id)
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    # 정규식 컴파일 (잘못된 패턴은 400 에러)
+    if regex:
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"잘못된 정규식 패턴입니다: {exc}",
+            ) from exc
+    else:
+        query_lower = query.lower()
+
+    # alignment(JSONL) 로드
+    segments: list[dict] = []
+    jsonl_file = session_dir / "meeting.stt.jsonl"
+    if jsonl_file.is_file():
+        try:
+            for line in jsonl_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    segments.append(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        except OSError:
+            pass
+
+    # JSONL이 없으면 meeting.md에서 파싱
+    if not segments:
+        md_pattern = re.compile(
+            r"^- \[(\d{2}:\d{2}:\d{2})\]\s*(.+?):\s*(.+)$"
+        )
+        for candidate in ("meeting.md", "meeting.raw.txt"):
+            transcript_file = session_dir / candidate
+            if transcript_file.is_file():
+                try:
+                    for line_text in transcript_file.read_text(encoding="utf-8").splitlines():
+                        m = md_pattern.match(line_text)
+                        if m:
+                            ts_str = m.group(1)
+                            parts = ts_str.split(":")
+                            ts_seconds = (
+                                int(parts[0]) * 3600
+                                + int(parts[1]) * 60
+                                + int(parts[2])
+                            )
+                            segments.append({
+                                "text": m.group(3),
+                                "speaker": m.group(2),
+                                "start": float(ts_seconds),
+                            })
+                except OSError:
+                    pass
+                break
+
+    # AND 조건 필터링
+    matches: list[dict] = []
+    for idx, seg in enumerate(segments):
+        text = str(seg.get("text", ""))
+        seg_speaker = str(seg.get("speaker", "?"))
+        timestamp = float(seg.get("start", 0.0))
+
+        # 텍스트 검색
+        if regex:
+            if not pattern.search(text):
+                continue
+        else:
+            if query_lower not in text.lower():
+                continue
+
+        # 화자 필터
+        if speaker and seg_speaker != speaker:
+            continue
+
+        # 시간 범위 필터
+        if time_start is not None and timestamp < time_start:
+            continue
+        if time_end is not None and timestamp > time_end:
+            continue
+
+        matches.append({
+            "index": idx,
+            "text": text,
+            "speaker": seg_speaker,
+            "timestamp": timestamp,
+        })
+
+    return {"matches": matches, "total": len(matches)}
+
+
 @app.get("/api/sessions/{session_id}/export", response_model=None)
 async def export_session_endpoint(
     request: Request,
@@ -910,10 +1281,24 @@ def _read_profiles_json() -> dict:
 
 
 def _write_profiles_json(data: dict) -> None:
-    """화자 프로필 JSON 파일에 저장한다."""
+    """화자 프로필 JSON 파일에 원자적으로 저장한다 (tempfile + os.replace)."""
     profiles_file = Path(_profiles_path) if _profiles_path else (OUTPUT_ROOT / "data" / "speakers.json")
     profiles_file.parent.mkdir(parents=True, exist_ok=True)
-    profiles_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 임시 파일에 먼저 쓰고 os.replace로 원자적 교체 (쓰기 중 충돌 시 데이터 손실 방지)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(profiles_file.parent), suffix=".tmp", prefix=".profiles_"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, str(profiles_file))
+    except BaseException:
+        # 실패 시 임시 파일 정리
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _validate_profile_name(name: str) -> str:
@@ -957,6 +1342,83 @@ def _get_audio_duration(file_path: str) -> float:
     return 0.0
 
 
+# --- 임베딩 연동 헬퍼 ---
+_PROFILE_MATCH_THRESHOLD = 0.70  # 프로필 매칭 코사인 유사도 임계값
+
+
+def _extract_embedding_from_file(file_path: str) -> list[float]:
+    """오디오 파일에서 화자 임베딩 벡터를 추출한다.
+
+    _diarizer가 활성화되어 있으면 pyannote 임베딩을 추출하고,
+    비활성화 상태면 빈 리스트를 반환한다.
+    """
+    if _diarizer is None:
+        return []
+
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(file_path, dtype="float32")
+
+        # 스테레오 → 모노 변환
+        if audio.ndim == 2:
+            audio = np.mean(audio, axis=1)
+
+        # 최소 1초 이상 필요
+        if len(audio) < sample_rate:
+            return []
+
+        embedding = _diarizer._extract_embedding(audio, sample_rate)
+        return embedding.tolist()
+    except Exception:
+        return []
+
+
+def _find_matching_profile(
+    embedding: list[float],
+    exclude_name: str = "",
+    threshold: float = _PROFILE_MATCH_THRESHOLD,
+) -> tuple[str | None, float]:
+    """기존 프로필과 임베딩 코사인 유사도를 비교하여 매칭되는 화자를 찾는다.
+
+    Args:
+        embedding: 비교할 임베딩 벡터
+        exclude_name: 비교에서 제외할 화자 이름 (자기 자신 업데이트 시)
+        threshold: 매칭 임계값 (기본 0.70)
+
+    Returns:
+        (매칭된 화자 이름, 유사도). 매칭 없으면 (None, 0.0).
+    """
+    if not embedding or _diarizer is None:
+        return None, 0.0
+
+    import numpy as np
+
+    data = _read_profiles_json()
+    speakers = data.get("speakers", {})
+
+    target = np.array(embedding, dtype=np.float32)
+    best_name: str | None = None
+    best_sim: float = 0.0
+
+    for name, info in speakers.items():
+        if name == exclude_name:
+            continue
+        known_emb = info.get("embedding", [])
+        if not known_emb:
+            continue
+        known = np.array(known_emb, dtype=np.float32)
+        sim = float(_diarizer._cosine_similarity(target, known))
+        if sim > best_sim:
+            best_sim = sim
+            best_name = name
+
+    if best_sim >= threshold:
+        return best_name, best_sim
+    return None, best_sim
+
+
 @app.get("/speaker-profile")
 async def speaker_profile_page() -> FileResponse:
     """화자 프로필 관리 HTML 페이지 서빙."""
@@ -970,7 +1432,8 @@ async def speaker_profile_page() -> FileResponse:
 async def get_profiles(request: Request) -> dict:
     """전체 화자 프로필 목록 반환."""
     _verify_api_key(request)
-    data = _read_profiles_json()
+    async with _profiles_lock:
+        data = _read_profiles_json()
     return data
 
 
@@ -985,16 +1448,10 @@ async def create_profile(
     _verify_api_key(request)
     name = _validate_profile_name(name)
 
-    data = _read_profiles_json()
-    if name in data["speakers"]:
-        raise HTTPException(status_code=409, detail=f"'{name}'은(는) 이미 등록된 화자입니다.")
-
-    # 임시 파일로 오디오 저장 후 duration 계산
-
+    # 오디오 파일 처리 (락 밖에서 I/O 수행)
     audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    # 안전한 파일명 생성
     ext = Path(audio.filename or "audio.wav").suffix or ".wav"
     safe_filename = re.sub(r"[^\w\-.]", "_", name) + ext
     audio_path = audio_dir / safe_filename
@@ -1004,13 +1461,41 @@ async def create_profile(
 
     duration = _get_audio_duration(str(audio_path))
 
-    data["speakers"][name] = {
-        "embedding": [],
-        "enrolled_at": datetime.now().isoformat(),
-        "duration_seconds": round(duration, 2),
-        "description": description.strip(),
-    }
-    _write_profiles_json(data)
+    # 임베딩 추출 (diarizer 활성화 시)
+    embedding = _extract_embedding_from_file(str(audio_path))
+
+    async with _profiles_lock:
+        data = _read_profiles_json()
+        if name in data["speakers"]:
+            raise HTTPException(status_code=409, detail=f"'{name}'은(는) 이미 등록된 화자입니다.")
+
+        # 임베딩 기반 중복 화자 검사 (임계값 0.7)
+        if embedding:
+            dup_name, dup_sim = _find_matching_profile(embedding)
+            if dup_name:
+                return {
+                    "ok": False,
+                    "error": f"'{dup_name}'과(와) 유사합니다 (유사도 {dup_sim:.0%})",
+                    "duplicate": dup_name,
+                    "similarity": round(dup_sim, 3),
+                }
+
+        data["speakers"][name] = {
+            "embedding": embedding,
+            "enrolled_at": datetime.now().isoformat(),
+            "duration_seconds": round(duration, 2),
+            "description": description.strip(),
+        }
+        _write_profiles_json(data)
+
+    # diarizer 런타임에도 등록 (실시간 화자 식별에 즉시 반영)
+    if _diarizer is not None and embedding:
+        import numpy as np
+
+        _diarizer.speaker_embeddings[name] = np.array(embedding, dtype=np.float32)
+        _diarizer._speaker_counts[name] = 0
+        _diarizer._enrolled_names.add(name)
+        _diarizer._profile_mode = True
 
     return {"ok": True, "name": name, "speakers": data["speakers"]}
 
@@ -1026,31 +1511,60 @@ async def update_profile(
     _verify_api_key(request)
     name = _validate_profile_name(name)
 
-    data = _read_profiles_json()
-    if name not in data["speakers"]:
-        raise HTTPException(status_code=404, detail=f"'{name}' 화자를 찾을 수 없습니다.")
-
-    speaker = data["speakers"][name]
-
-    if description is not None:
-        speaker["description"] = description.strip()
-
+    # 오디오 I/O는 락 밖에서 수행
+    audio_content: bytes | None = None
     if audio is not None:
-        audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
-        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_content = await audio.read()
 
-        ext = Path(audio.filename or "audio.wav").suffix or ".wav"
-        safe_filename = re.sub(r"[^\w\-.]", "_", name) + ext
-        audio_path = audio_dir / safe_filename
+    async with _profiles_lock:
+        data = _read_profiles_json()
+        if name not in data["speakers"]:
+            raise HTTPException(status_code=404, detail=f"'{name}' 화자를 찾을 수 없습니다.")
 
-        content = await audio.read()
-        audio_path.write_bytes(content)
+        speaker = data["speakers"][name]
 
-        duration = _get_audio_duration(str(audio_path))
-        speaker["duration_seconds"] = round(duration, 2)
-        speaker["embedding"] = []  # 오디오 변경 시 임베딩 초기화
+        if description is not None:
+            speaker["description"] = description.strip()
 
-    _write_profiles_json(data)
+        if audio_content is not None:
+            audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+
+            ext = Path(audio.filename or "audio.wav").suffix or ".wav"
+            safe_filename = re.sub(r"[^\w\-.]", "_", name) + ext
+            audio_path = audio_dir / safe_filename
+
+            audio_path.write_bytes(audio_content)
+
+            duration = _get_audio_duration(str(audio_path))
+            speaker["duration_seconds"] = round(duration, 2)
+
+            # 임베딩 재추출 (diarizer 활성화 시)
+            embedding = _extract_embedding_from_file(str(audio_path))
+
+            # 임베딩 기반 중복 화자 검사 (자기 자신 제외)
+            if embedding:
+                dup_name, dup_sim = _find_matching_profile(embedding, exclude_name=name)
+                if dup_name:
+                    return {
+                        "ok": False,
+                        "error": f"'{dup_name}'과(와) 유사합니다 (유사도 {dup_sim:.0%})",
+                        "duplicate": dup_name,
+                        "similarity": round(dup_sim, 3),
+                    }
+
+            speaker["embedding"] = embedding
+
+            # diarizer 런타임에도 갱신 (실시간 화자 식별에 즉시 반영)
+            if _diarizer is not None and embedding:
+                import numpy as np
+
+                _diarizer.speaker_embeddings[name] = np.array(embedding, dtype=np.float32)
+                _diarizer._speaker_counts[name] = 0
+                _diarizer._enrolled_names.add(name)
+                _diarizer._profile_mode = True
+
+        _write_profiles_json(data)
 
     return {"ok": True, "name": name, "speaker": speaker}
 
@@ -1061,14 +1575,15 @@ async def delete_profile(request: Request, name: str) -> dict:
     _verify_api_key(request)
     name = _validate_profile_name(name)
 
-    data = _read_profiles_json()
-    if name not in data["speakers"]:
-        raise HTTPException(status_code=404, detail=f"'{name}' 화자를 찾을 수 없습니다.")
+    async with _profiles_lock:
+        data = _read_profiles_json()
+        if name not in data["speakers"]:
+            raise HTTPException(status_code=404, detail=f"'{name}' 화자를 찾을 수 없습니다.")
 
-    del data["speakers"][name]
-    _write_profiles_json(data)
+        del data["speakers"][name]
+        _write_profiles_json(data)
 
-    # 오디오 파일도 정리
+    # 오디오 파일도 정리 (락 밖에서 수행)
     audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
     if audio_dir.is_dir():
         safe_prefix = re.sub(r"[^\w\-.]", "_", name)
@@ -1080,6 +1595,95 @@ async def delete_profile(request: Request, name: str) -> dict:
                     pass
 
     return {"ok": True, "deleted": name, "speakers": data["speakers"]}
+
+
+# --- 미등록 화자 자동 등록 API ---
+
+
+@app.get("/api/speakers/unknown")
+async def list_unknown_speakers(request: Request) -> dict:
+    """미등록 화자 목록 반환 (임베딩 수, 첫/마지막 발화 시간, 자동 등록 후보 여부)."""
+    _verify_api_key(request)
+    if _diarizer is None:
+        return {"unknown_speakers": [], "available": False}
+    return {"unknown_speakers": _unknown_tracker.list_unknown(), "available": True}
+
+
+@app.post("/api/speakers/auto-register")
+async def auto_register_speaker(request: Request, body: dict) -> dict:
+    """미등록 화자를 프로필에 등록한다.
+
+    body: {"speaker_id": "unknown_1", "name": "화자명(선택)"}
+    name 미지정 시 기본 이름 Speaker_N 부여.
+    """
+    _verify_api_key(request)
+    import numpy as np
+
+    if _diarizer is None:
+        raise HTTPException(status_code=400, detail="화자 분리가 비활성화되어 있습니다.")
+
+    speaker_id = (body.get("speaker_id") or "").strip()
+    if not speaker_id:
+        raise HTTPException(status_code=400, detail="speaker_id는 필수입니다.")
+
+    info = _unknown_tracker.get(speaker_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"미등록 화자 '{speaker_id}'를 찾을 수 없습니다.")
+
+    # 평균 임베딩으로 프로필 등록
+    embedding = info["mean"]
+
+    async with _profiles_lock:
+        # 이름 결정 (미지정 시 자동 생성)
+        name = (body.get("name") or "").strip()
+        if not name:
+            data = _read_profiles_json()
+            existing_count = len(data.get("speakers", {}))
+            name = f"Speaker_{existing_count + 1}"
+
+        name = _validate_profile_name(name)
+
+        # 기존 프로필과 이름 중복 확인
+        data = _read_profiles_json()
+        if name in data.get("speakers", {}):
+            raise HTTPException(status_code=409, detail=f"'{name}'은(는) 이미 등록된 화자입니다.")
+
+        data["speakers"][name] = {
+            "embedding": embedding,
+            "enrolled_at": datetime.now().isoformat(),
+            "description": f"자동 등록 (세그먼트 {len(info['embeddings'])}개 평균)",
+        }
+        _write_profiles_json(data)
+
+    # diarizer 런타임에도 즉시 반영
+    _diarizer.speaker_embeddings[name] = np.array(embedding, dtype=np.float32)
+    _diarizer._speaker_counts[name] = 0
+    _diarizer._enrolled_names.add(name)
+    _diarizer._profile_mode = True
+
+    # 미등록 목록에서 제거
+    _unknown_tracker.remove(speaker_id)
+
+    return {
+        "ok": True,
+        "name": name,
+        "speaker_id": speaker_id,
+        "segment_count": len(info["embeddings"]),
+    }
+
+
+@app.delete("/api/speakers/unknown/{speaker_id}")
+async def delete_unknown_speaker(request: Request, speaker_id: str) -> dict:
+    """미등록 화자를 무시/삭제한다."""
+    _verify_api_key(request)
+
+    if "/" in speaker_id or "\\" in speaker_id or ".." in speaker_id:
+        raise HTTPException(status_code=400, detail="잘못된 speaker_id입니다.")
+
+    if not _unknown_tracker.remove(speaker_id):
+        raise HTTPException(status_code=404, detail=f"미등록 화자 '{speaker_id}'를 찾을 수 없습니다.")
+
+    return {"ok": True, "deleted": speaker_id}
 
 
 @app.post("/api/sessions/new")
@@ -1094,6 +1698,9 @@ async def new_session(request: Request) -> dict:
     _segment_count = 0
     _speakers.clear()
     _start_time = time.time()
+
+    # 미등록 화자 임시 데이터 리셋
+    _unknown_tracker.reset()
 
     # 세션 회전 플래그 설정 (CLI 루프에서 감지 → 콜백 호출)
     _session_rotate_event.set()
@@ -1216,6 +1823,8 @@ __all__ = [
     "push_correction_sync",
     "run_server",
     "_client_queues",
+    "_connected_websockets",
+    "ws_transcribe",
     "is_paused",
     "add_keyword",
     "remove_keyword",
@@ -1234,12 +1843,17 @@ __all__ = [
     "list_sessions",
     "get_session",
     "new_session",
+    "search_session",
     "export_session_endpoint",
     "speaker_profile_page",
     "get_profiles",
     "create_profile",
     "update_profile",
     "delete_profile",
+    "list_unknown_speakers",
+    "auto_register_speaker",
+    "delete_unknown_speaker",
+    "_unknown_tracker",
     "is_session_rotate_requested",
     "consume_session_rotate",
     "set_session_rotate_callback",

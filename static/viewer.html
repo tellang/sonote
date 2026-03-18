@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>회의 실시간 전사</title>
+    <title>sonote — 실시간 회의 전사</title>
     <style>
         :root, :root[data-theme="dark"] {
             /* === Surface 계층 (OKLCH 기반) === */
@@ -914,6 +914,59 @@
             background: var(--danger);
         }
 
+        /* WebSocket 토글 스위치 */
+        .ws-toggle-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            font-size: var(--text-xs);
+            color: var(--text-tertiary);
+            user-select: none;
+            padding: 2px 6px;
+            border-radius: 6px;
+            transition: color var(--dur-fast);
+        }
+        .ws-toggle-label:hover {
+            color: var(--text-secondary);
+        }
+        .ws-toggle-label input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 28px;
+            height: 16px;
+            border-radius: 8px;
+            background: var(--surface-3);
+            position: relative;
+            cursor: pointer;
+            transition: background var(--dur-fast);
+            flex-shrink: 0;
+        }
+        .ws-toggle-label input[type="checkbox"]::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--text-tertiary);
+            transition: transform var(--dur-fast), background var(--dur-fast);
+        }
+        .ws-toggle-label input[type="checkbox"]:checked {
+            background: color-mix(in oklch, var(--accent) 50%, transparent);
+        }
+        .ws-toggle-label input[type="checkbox"]:checked::after {
+            transform: translateX(12px);
+            background: var(--accent);
+        }
+        .ws-toggle-text {
+            font-family: var(--font-mono);
+            font-size: 0.68rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+
         @keyframes pulse-ring {
             0% { transform: scale(1); opacity: 0.4; }
             100% { transform: scale(2.4); opacity: 0; }
@@ -1440,6 +1493,238 @@
             margin-left: auto;
         }
 
+        /* === 전사 검색 바 (고도화) === */
+        .transcript-search-bar {
+            display: none;
+            flex-direction: column;
+            gap: 6px;
+            padding: 8px 12px;
+            background: oklch(var(--overlay-base) / 0.03);
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            animation: tsb-slide-in var(--dur-normal) var(--ease-out-expo);
+        }
+
+        @keyframes tsb-slide-in {
+            from { opacity: 0; transform: translateY(-6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .transcript-search-bar.visible {
+            display: flex;
+        }
+
+        .tsb-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .tsb-input-wrap {
+            position: relative;
+            flex: 1;
+        }
+
+        .tsb-input-icon {
+            position: absolute;
+            left: 9px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-tertiary);
+            font-size: 12px;
+            pointer-events: none;
+        }
+
+        .tsb-input {
+            width: 100%;
+            padding: 7px 10px 7px 30px;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            background: var(--input-bg);
+            color: var(--text-primary);
+            font-size: var(--text-xs);
+            font-family: var(--font-sans);
+            outline: none;
+            transition: border-color var(--dur-fast);
+        }
+
+        .tsb-input:focus {
+            border-color: color-mix(in oklch, var(--accent) 50%, transparent);
+        }
+
+        .tsb-input::placeholder {
+            color: var(--text-tertiary);
+        }
+
+        /* 정규식 모드 활성 시 입력 필드 테두리 */
+        .tsb-input.regex-active {
+            border-color: oklch(0.65 0.18 310);
+        }
+
+        /* 정규식 에러 시 입력 필드 테두리 */
+        .tsb-input.regex-error {
+            border-color: var(--danger);
+        }
+
+        .tsb-toggle-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 32px;
+            height: 30px;
+            border-radius: 6px;
+            border: 1px solid var(--border-subtle);
+            background: transparent;
+            color: var(--text-tertiary);
+            cursor: pointer;
+            font-size: 11px;
+            font-family: var(--font-mono);
+            font-weight: 600;
+            padding: 0 6px;
+            transition: all var(--dur-fast);
+            white-space: nowrap;
+        }
+
+        .tsb-toggle-btn:hover {
+            background: oklch(var(--overlay-base) / 0.06);
+            color: var(--text-primary);
+        }
+
+        .tsb-toggle-btn[aria-pressed="true"] {
+            background: color-mix(in oklch, var(--accent) 18%, transparent);
+            color: var(--accent);
+            border-color: color-mix(in oklch, var(--accent) 40%, transparent);
+        }
+
+        /* 정규식 토글 활성 시 보라색 강조 */
+        .tsb-regex-btn[aria-pressed="true"] {
+            background: color-mix(in oklch, oklch(0.65 0.18 310) 18%, transparent);
+            color: oklch(0.65 0.18 310);
+            border-color: color-mix(in oklch, oklch(0.65 0.18 310) 40%, transparent);
+        }
+
+        /* 필터 패널 */
+        .tsb-filter-panel {
+            display: none;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            padding-top: 4px;
+            border-top: 1px solid var(--border-subtle);
+            animation: tsb-slide-in var(--dur-fast) var(--ease-out-expo);
+        }
+
+        .tsb-filter-panel.visible {
+            display: flex;
+        }
+
+        .tsb-filter-label {
+            font-size: 0.68rem;
+            font-family: var(--font-mono);
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            flex-shrink: 0;
+        }
+
+        .tsb-speaker-select,
+        .tsb-time-input {
+            padding: 5px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-subtle);
+            background: var(--input-bg);
+            color: var(--text-primary);
+            font-size: var(--text-xs);
+            font-family: var(--font-sans);
+            outline: none;
+            transition: border-color var(--dur-fast);
+        }
+
+        .tsb-speaker-select:focus,
+        .tsb-time-input:focus {
+            border-color: color-mix(in oklch, var(--accent) 50%, transparent);
+        }
+
+        .tsb-speaker-select {
+            min-width: 90px;
+            max-width: 140px;
+        }
+
+        .tsb-time-input {
+            width: 80px;
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+        }
+
+        .tsb-time-sep {
+            color: var(--text-tertiary);
+            font-size: 0.7rem;
+        }
+
+        /* 필터 배지 + 초기화 */
+        .tsb-filter-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+        }
+
+        .tsb-filter-badge {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: color-mix(in oklch, var(--accent) 15%, transparent);
+            color: var(--accent);
+            font-size: 0.68rem;
+            font-family: var(--font-mono);
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .tsb-filter-badge.visible {
+            display: inline-flex;
+        }
+
+        .tsb-reset-btn {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-subtle);
+            background: transparent;
+            color: var(--text-tertiary);
+            cursor: pointer;
+            font-size: 0.68rem;
+            font-family: var(--font-mono);
+            transition: all var(--dur-fast);
+        }
+
+        .tsb-reset-btn.visible {
+            display: inline-flex;
+        }
+
+        .tsb-reset-btn:hover {
+            background: color-mix(in oklch, var(--danger) 12%, transparent);
+            color: var(--danger);
+            border-color: color-mix(in oklch, var(--danger) 30%, transparent);
+        }
+
+        /* 정규식 에러 메시지 */
+        .tsb-regex-error {
+            display: none;
+            font-size: 0.68rem;
+            color: var(--danger);
+            font-family: var(--font-mono);
+            padding: 2px 4px;
+        }
+
+        .tsb-regex-error.visible {
+            display: block;
+        }
+
         /* === 가상 스크롤 컨테이너 === */
         .virtual-scroll-container {
             position: relative;
@@ -1919,7 +2204,7 @@
                     <line x1="2" y1="12" x2="14" y2="12"/>
                 </svg>
             </button>
-            <h1>회의 실시간 전사</h1>
+            <h1>sonote</h1>
             <span class="header-badge" id="auto-scroll" role="status" aria-live="polite">자동 스크롤 ON</span>
         </div>
 
@@ -1930,6 +2215,40 @@
                 <button class="history-banner-btn" id="history-pdf-btn" onclick="downloadSessionPdf()" aria-label="현재 세션을 PDF로 다운로드" style="display:none;">PDF</button>
                 <button class="history-banner-btn" onclick="returnToLiveSession()">실시간으로 복귀</button>
             </div>
+        </div>
+
+        <!-- 전사 검색 바 (고도화) -->
+        <div class="transcript-search-bar" id="transcript-search-bar" role="search" aria-label="전사 텍스트 검색">
+            <div class="tsb-row">
+                <div class="tsb-input-wrap">
+                    <span class="tsb-input-icon" aria-hidden="true">&#x1F50D;</span>
+                    <input type="text" class="tsb-input" id="tsb-input"
+                           placeholder="전사 텍스트 검색... (Ctrl+F)"
+                           aria-label="전사 텍스트 검색"
+                           autocomplete="off" />
+                </div>
+                <button class="tsb-toggle-btn tsb-regex-btn" id="tsb-regex-toggle"
+                        aria-pressed="false" aria-label="정규식 모드 토글" title="정규식 모드 (.*)">.*</button>
+                <button class="tsb-toggle-btn" id="tsb-filter-toggle"
+                        aria-pressed="false" aria-expanded="false"
+                        aria-controls="tsb-filter-panel"
+                        aria-label="필터 패널 토글" title="필터 (화자, 시간대)">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><line x1="2" y1="4" x2="14" y2="4"/><line x1="4" y1="8" x2="12" y2="8"/><line x1="6" y1="12" x2="10" y2="12"/></svg>
+                </button>
+                <span class="tsb-filter-badge" id="tsb-filter-badge" aria-live="polite"></span>
+                <button class="tsb-reset-btn" id="tsb-reset-btn" title="필터 초기화" aria-label="검색 필터 모두 초기화">초기화</button>
+            </div>
+            <div class="tsb-filter-panel" id="tsb-filter-panel">
+                <span class="tsb-filter-label">화자</span>
+                <select class="tsb-speaker-select" id="tsb-speaker-select" aria-label="화자 필터">
+                    <option value="">전체</option>
+                </select>
+                <span class="tsb-filter-label" style="margin-left:6px;">시간</span>
+                <input type="text" class="tsb-time-input" id="tsb-time-start" placeholder="00:00" aria-label="시작 시간" />
+                <span class="tsb-time-sep">~</span>
+                <input type="text" class="tsb-time-input" id="tsb-time-end" placeholder="99:59" aria-label="종료 시간" />
+            </div>
+            <div class="tsb-regex-error" id="tsb-regex-error" role="alert" aria-live="assertive"></div>
         </div>
 
         <!-- 검색 결과 네비게이션 -->
@@ -1952,6 +2271,10 @@
                         <span class="live-dot"></span>
                         <span class="status-text">재연결 중</span>
                 </span>
+                <label class="ws-toggle-label" title="WebSocket 양방향 통신 사용">
+                    <input type="checkbox" id="ws-toggle" onchange="switchProtocol(this.checked)">
+                    <span class="ws-toggle-text">WS</span>
+                </label>
                 <button class="btn" id="btn-pause" onclick="togglePause()" disabled>
                     <span id="btn-pause-text">● 녹음 중</span>
                     <span class="audio-ring" id="mic-indicator">
@@ -2615,6 +2938,13 @@
         const transcriptMergeMaxSegments = 4;
         const transcriptMergeMaxChars = 280;
 
+        // WebSocket 지원
+        let useWebSocket = false;
+        let wsConnection = null;
+        let wsReconnectAttempts = 0;
+        let wsReconnectTimer = null;
+        const WS_MAX_RECONNECT_DELAY = 30000; // 30초
+
         let pipWindow = null;
 
         async function togglePip() {
@@ -3060,8 +3390,9 @@
         function setConnectionState(status) {
             const statusText = connectionEl.querySelector(".status-text");
             connectionEl.classList.remove("connected", "reconnecting", "disconnected");
+            const proto = useWebSocket ? "WS" : "SSE";
             if (status === true || status === "connected") {
-                statusText.textContent = "연결됨";
+                statusText.textContent = `연결됨 (${proto})`;
                 connectionEl.classList.add("connected");
             } else if (status === "disconnected") {
                 statusText.textContent = "연결 끊김";
@@ -3590,6 +3921,145 @@
         const MAX_RECONNECT_DELAY = 30000; // 30초
         const DISCONNECTED_THRESHOLD = 5;  // 이 횟수 이상 실패 시 "연결 끊김" 상태
 
+        /* === WebSocket 연결 === */
+        function connectWebSocket() {
+            if (AppState.currentView === "history") {
+                console.log("[WS] 과거 세션 조회 중 — 연결 생략");
+                return;
+            }
+
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+            if (wsConnection) {
+                try { wsConnection.close(); } catch (e) { /* 무시 */ }
+            }
+
+            const proto = location.protocol === "https:" ? "wss:" : "ws:";
+            const wsUrl = `${proto}//${location.host}/ws/transcribe`;
+            console.log("[WS] 연결 시도:", wsUrl);
+            wsConnection = new WebSocket(wsUrl);
+
+            wsConnection.onopen = () => {
+                console.log("[WS] 연결 성공");
+                setConnectionState("connected");
+                wsReconnectAttempts = 0;
+            };
+
+            wsConnection.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    const msgType = msg.type || "";
+
+                    if (msgType === "transcript") {
+                        appendTranscript({
+                            speaker: msg.speaker,
+                            text: msg.text,
+                            ts: msg.ts,
+                        });
+                    } else if (msgType === "correction") {
+                        const corrections = msg.corrections || [];
+                        for (const c of corrections) {
+                            applyCorrectionToSegment(c.index, c.corrected);
+                        }
+                    } else if (msgType === "polish_progress") {
+                        updateSessionProgress(msg);
+                    } else if (msgType === "session_created" || msgType === "session_updated") {
+                        loadSessionList();
+                    } else if (msgType === "session_deleted") {
+                        const deletedId = msg.id || msg.session_id;
+                        if (deletedId && AppState.currentView === "history" && AppState.currentSessionId === deletedId) {
+                            returnToLiveSession();
+                        }
+                        loadSessionList();
+                    } else if (msgType === "speaker_edited") {
+                        // 화자 수정 브로드캐스트 반영
+                        const segSpan = transcriptEl.querySelector(`[data-segment-index="${msg.index}"]`);
+                        if (segSpan) {
+                            const bubble = segSpan.closest(".transcript-bubble");
+                            if (bubble) {
+                                const nameEl = bubble.querySelector(".speaker-name");
+                                if (nameEl) nameEl.textContent = msg.speaker;
+                            }
+                        }
+                    } else if (msgType === "segment_edited") {
+                        applyCorrectionToSegment(msg.index, msg.text);
+                    } else if (msgType === "search_result") {
+                        console.log(`[WS] 검색 결과: ${msg.count}건`);
+                    } else if (msgType === "ping") {
+                        wsConnection.send(JSON.stringify({ type: "pong" }));
+                    } else if (msgType === "pong" || msgType === "error") {
+                        // 무시 또는 로그
+                        if (msgType === "error") console.warn("[WS] 서버 오류:", msg.message);
+                    }
+                } catch (e) {
+                    console.error("[WS] 메시지 처리 실패:", e);
+                }
+            };
+
+            wsConnection.onclose = (event) => {
+                console.log(`[WS] 연결 종료 (code=${event.code})`);
+                if (AppState.currentView === "history") return;
+
+                // 인증 실패 시 SSE로 폴백
+                if (event.code === 4003) {
+                    console.warn("[WS] 인증 실패 — SSE로 폴백");
+                    useWebSocket = false;
+                    updateWsToggleUI();
+                    connectStream();
+                    return;
+                }
+
+                if (wsReconnectAttempts >= DISCONNECTED_THRESHOLD) {
+                    // WebSocket 최대 재시도 초과 — SSE로 폴백
+                    console.warn("[WS] 재연결 한도 초과 — SSE로 폴백");
+                    useWebSocket = false;
+                    updateWsToggleUI();
+                    setConnectionState("reconnecting");
+                    connectStream();
+                    return;
+                }
+
+                setConnectionState("reconnecting");
+                const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempts), WS_MAX_RECONNECT_DELAY);
+                wsReconnectAttempts++;
+                console.log(`[WS] 재연결 시도 ${wsReconnectAttempts} (${delay / 1000}초 후)`);
+                wsReconnectTimer = setTimeout(connectWebSocket, delay);
+            };
+
+            wsConnection.onerror = (err) => {
+                console.error("[WS] 오류 발생:", err);
+            };
+        }
+
+        /** WebSocket 토글 UI 상태 업데이트 */
+        function updateWsToggleUI() {
+            const toggle = document.getElementById("ws-toggle");
+            if (toggle) toggle.checked = useWebSocket;
+        }
+
+        /** 프로토콜 전환 (SSE <-> WebSocket) */
+        function switchProtocol(toWebSocket) {
+            useWebSocket = toWebSocket;
+            // 기존 연결 정리
+            if (source) { source.close(); source = null; }
+            if (wsConnection) {
+                try { wsConnection.close(); } catch (e) { /* 무시 */ }
+                wsConnection = null;
+            }
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+            reconnectAttempts = 0;
+            wsReconnectAttempts = 0;
+
+            if (useWebSocket) {
+                connectWebSocket();
+            } else {
+                connectStream();
+            }
+        }
+
         function connectStream() {
             // 과거 세션 조회 중이면 재연결하지 않음
             if (AppState.currentView === "history") {
@@ -4019,41 +4489,452 @@
             }
         }
 
-        // 검색 입력 디바운스
-        let highlightDebounceTimer = null;
+        // 사이드바 세션 검색 입력 디바운스
         const sessionSearchInput = document.getElementById("session-search-input");
         sessionSearchInput.addEventListener("input", () => {
             clearTimeout(searchDebounceTimer);
             searchDebounceTimer = setTimeout(() => {
                 loadSessionList();
             }, 300);
-
-            // 전사 텍스트 하이라이트
-            clearTimeout(highlightDebounceTimer);
-            highlightDebounceTimer = setTimeout(() => {
-                const query = sessionSearchInput.value.trim();
-                highlightTranscript(query);
-            }, 200);
         });
 
-        // 검색 결과 네비게이션 키보드 (Enter/Shift+Enter)
-        sessionSearchInput.addEventListener("keydown", (e) => {
+        /* === 검색 상태 관리 === */
+        let searchMatchCount = 0;
+        let searchCurrentIndex = -1;
+        let tsbRegexMode = false;
+
+        /* === 전사 검색 바 (고도화) 로직 === */
+        const tsbInputEl = document.getElementById("tsb-input");
+        const tsbRegexToggle = document.getElementById("tsb-regex-toggle");
+        const tsbFilterToggle = document.getElementById("tsb-filter-toggle");
+        const tsbFilterPanel = document.getElementById("tsb-filter-panel");
+        const tsbSpeakerSelect = document.getElementById("tsb-speaker-select");
+        const tsbTimeStart = document.getElementById("tsb-time-start");
+        const tsbTimeEnd = document.getElementById("tsb-time-end");
+        const tsbFilterBadge = document.getElementById("tsb-filter-badge");
+        const tsbResetBtn = document.getElementById("tsb-reset-btn");
+        const tsbRegexError = document.getElementById("tsb-regex-error");
+        const tsbBar = document.getElementById("transcript-search-bar");
+
+        /* 검색 바 표시/숨김 */
+        function showTranscriptSearchBar() {
+            tsbBar.classList.add("visible");
+            tsbInputEl.focus();
+        }
+
+        function hideTranscriptSearchBar() {
+            tsbBar.classList.remove("visible");
+            clearTranscriptSearch();
+        }
+
+        /* 정규식 토글 */
+        tsbRegexToggle.addEventListener("click", () => {
+            tsbRegexMode = !tsbRegexMode;
+            tsbRegexToggle.setAttribute("aria-pressed", String(tsbRegexMode));
+            tsbInputEl.classList.toggle("regex-active", tsbRegexMode);
+            runTranscriptSearch();
+        });
+
+        /* 필터 패널 토글 */
+        tsbFilterToggle.addEventListener("click", () => {
+            const isVisible = tsbFilterPanel.classList.contains("visible");
+            tsbFilterPanel.classList.toggle("visible", !isVisible);
+            tsbFilterToggle.setAttribute("aria-pressed", String(!isVisible));
+            tsbFilterToggle.setAttribute("aria-expanded", String(!isVisible));
+
+            if (isVisible) {
+                // 필터 닫을 때 값 초기화 + 재검색
+                tsbSpeakerSelect.value = "";
+                tsbTimeStart.value = "";
+                tsbTimeEnd.value = "";
+                runTranscriptSearch();
+            } else {
+                // 필터 열 때 화자 목록 갱신
+                populateSpeakerDropdown();
+            }
+        });
+
+        /* 화자 드롭다운 갱신 */
+        function populateSpeakerDropdown() {
+            const transcript = document.getElementById("transcript");
+            if (!transcript) return;
+
+            const speakerSet = new Set();
+            // VirtualScroll.allItems에서 화자 수집
+            for (const item of VirtualScroll.allItems) {
+                const s = String(item.speaker || "").trim();
+                if (s && s !== "?") speakerSet.add(s);
+            }
+            // DOM에서도 수집 (fallback)
+            if (speakerSet.size === 0) {
+                transcript.querySelectorAll("p[data-speaker]").forEach(p => {
+                    const s = (p.dataset.speaker || "").trim();
+                    if (s && s !== "?") speakerSet.add(s);
+                });
+            }
+
+            const prev = tsbSpeakerSelect.value;
+            tsbSpeakerSelect.innerHTML = '<option value="">전체</option>';
+            Array.from(speakerSet).sort().forEach(s => {
+                const opt = document.createElement("option");
+                opt.value = s;
+                opt.textContent = s;
+                tsbSpeakerSelect.appendChild(opt);
+            });
+            if (prev && speakerSet.has(prev)) tsbSpeakerSelect.value = prev;
+        }
+
+        /* 시간 문자열 → 초 변환 (HH:MM:SS 또는 MM:SS) */
+        function parseTimeToSeconds(str) {
+            if (!str || !str.trim()) return NaN;
+            const cleaned = str.trim().replace(/[^0-9:]/g, "");
+            const parts = cleaned.split(":").map(Number);
+            if (parts.some(isNaN)) return NaN;
+            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+            if (parts.length === 2) return parts[0] * 60 + parts[1];
+            if (parts.length === 1) return parts[0] * 60; // 분만 입력
+            return NaN;
+        }
+
+        /* 타임스탬프 텍스트에서 시작 시간(초) 추출 */
+        function extractStartSeconds(tsText) {
+            if (!tsText) return NaN;
+            // "01:23:45 ~ 01:24:00" 또는 "01:23:45"
+            const first = tsText.split("~")[0].trim();
+            return parseTimeToSeconds(first);
+        }
+
+        /* 활성 필터 개수 계산 + 배지/초기화 버튼 업데이트 */
+        function updateFilterBadge() {
+            let count = 0;
+            if (tsbSpeakerSelect.value) count++;
+            if (tsbTimeStart.value.trim()) count++;
+            if (tsbTimeEnd.value.trim()) count++;
+            if (tsbRegexMode) count++;
+
+            if (count > 0) {
+                tsbFilterBadge.textContent = `${count}개 필터`;
+                tsbFilterBadge.classList.add("visible");
+                tsbResetBtn.classList.add("visible");
+            } else {
+                tsbFilterBadge.classList.remove("visible");
+                tsbResetBtn.classList.remove("visible");
+            }
+        }
+
+        /* 필터 초기화 */
+        tsbResetBtn.addEventListener("click", () => {
+            tsbInputEl.value = "";
+            tsbSpeakerSelect.value = "";
+            tsbTimeStart.value = "";
+            tsbTimeEnd.value = "";
+            tsbRegexMode = false;
+            tsbRegexToggle.setAttribute("aria-pressed", "false");
+            tsbInputEl.classList.remove("regex-active", "regex-error");
+            tsbRegexError.classList.remove("visible");
+            tsbRegexError.textContent = "";
+            runTranscriptSearch();
+        });
+
+        /* 필터 변경 시 재검색 */
+        tsbSpeakerSelect.addEventListener("change", () => runTranscriptSearch());
+        tsbTimeStart.addEventListener("input", () => { clearTimeout(tsbTimeDebounce); tsbTimeDebounce = setTimeout(runTranscriptSearch, 400); });
+        tsbTimeEnd.addEventListener("input", () => { clearTimeout(tsbTimeDebounce); tsbTimeDebounce = setTimeout(runTranscriptSearch, 400); });
+        let tsbTimeDebounce = null;
+
+        /* 검색 입력 디바운스 */
+        let tsbSearchDebounce = null;
+        tsbInputEl.addEventListener("input", () => {
+            clearTimeout(tsbSearchDebounce);
+            tsbSearchDebounce = setTimeout(runTranscriptSearch, 200);
+        });
+
+        /* 검색 결과 네비게이션 키보드 (Enter/Shift+Enter) */
+        tsbInputEl.addEventListener("keydown", (e) => {
             if (e.key === "Enter") {
                 e.preventDefault();
                 if (searchMatchCount > 0) {
                     navigateSearch(e.shiftKey ? -1 : 1);
                 }
             }
+            if (e.key === "Escape") {
+                e.preventDefault();
+                hideTranscriptSearchBar();
+            }
         });
 
-        /* === 검색 상태 관리 === */
-        let searchMatchCount = 0;
-        let searchCurrentIndex = -1;
+        /* Ctrl+F 글로벌 단축키 */
+        document.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+                e.preventDefault();
+                showTranscriptSearchBar();
+            }
+            if (e.key === "Escape" && tsbBar.classList.contains("visible")) {
+                hideTranscriptSearchBar();
+            }
+        });
 
-        /* === 전사 텍스트 검색 하이라이트 (네비게이션 포함) === */
-        function highlightTranscript(query) {
+        /* === 서버 사이드 검색 임계값 === */
+        const SERVER_SEARCH_THRESHOLD = 1000;
+        let _serverSearchAbort = null;  // 진행 중인 서버 검색 취소용
+
+        /* 서버 사이드 검색이 필요한지 판별 */
+        function shouldUseServerSearch() {
+            // 과거 세션 조회 중이고, 세그먼트 수가 임계값 초과
+            return AppState.currentView === "history"
+                && AppState.currentSessionId
+                && VirtualScroll.allItems.length > SERVER_SEARCH_THRESHOLD;
+        }
+
+        /* 서버 검색 API 호출 */
+        async function runServerSearch(query, opts) {
+            const sessionId = AppState.currentSessionId;
+            if (!sessionId || !query) return null;
+
+            // 이전 요청 취소
+            if (_serverSearchAbort) _serverSearchAbort.abort();
+            _serverSearchAbort = new AbortController();
+
+            const params = new URLSearchParams();
+            params.set("query", query);
+            if (opts.speakerFilter) {
+                // API는 원본 대소문자 화자명을 기대 — allItems에서 매칭
+                const original = VirtualScroll.allItems.find(
+                    it => String(it.speaker || "").trim().toUpperCase() === opts.speakerFilter
+                );
+                params.set("speaker", original ? String(original.speaker).trim() : opts.speakerFilter);
+            }
+            if (!isNaN(opts.timeStartSec)) params.set("time_start", String(opts.timeStartSec));
+            if (!isNaN(opts.timeEndSec)) params.set("time_end", String(opts.timeEndSec));
+            if (opts.regexMode) params.set("regex", "true");
+
+            const res = await fetch(
+                `/api/sessions/${encodeURIComponent(sessionId)}/search?${params}`,
+                { signal: _serverSearchAbort.signal, cache: "no-store" }
+            );
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: "서버 오류" }));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            return res.json();
+        }
+
+        /* 서버 검색 결과를 기존 UI에 렌더링 */
+        function renderServerSearchResults(data, query, opts) {
             const transcript = document.getElementById("transcript");
             if (!transcript) return;
+
+            const wasVirtualScrollEnabled = VirtualScroll.enabled;
+            if (wasVirtualScrollEnabled) VirtualScroll.deactivate();
+
+            // 기존 하이라이트/숨김 상태 초기화
+            transcript.querySelectorAll("mark").forEach(mark => {
+                const parent = mark.parentNode;
+                parent.replaceChild(document.createTextNode(mark.textContent), mark);
+                parent.normalize();
+            });
+            const oldInfo = transcript.querySelector(".search-result-info");
+            if (oldInfo) oldInfo.remove();
+            transcript.querySelectorAll("p[data-tsb-hidden]").forEach(p => {
+                p.style.display = "";
+                delete p.dataset.tsbHidden;
+            });
+
+            // 로딩 표시 제거
+            const loadingEl = transcript.querySelector(".search-loading-indicator");
+            if (loadingEl) loadingEl.remove();
+
+            searchMatchCount = 0;
+            searchCurrentIndex = -1;
+
+            const navBar = document.getElementById("search-nav-bar");
+            const navCounter = document.getElementById("search-nav-counter");
+            const matches = data.matches || [];
+
+            // 서버가 반환한 index를 Set으로 변환 (빠른 조회)
+            const matchIndexSet = new Set(matches.map(m => m.index));
+
+            // 매치되지 않은 행 숨기기 + 매치된 행 하이라이트
+            const allParagraphs = transcript.querySelectorAll("p[data-speaker]");
+            let regex = null;
+            if (query) {
+                try {
+                    regex = opts.regexMode
+                        ? new RegExp(query, "gi")
+                        : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+                } catch (_) { /* 정규식 에러는 서버가 이미 검증 */ }
+            }
+
+            allParagraphs.forEach((p, idx) => {
+                // vs-index가 있으면 그걸 사용, 아니면 DOM 순서
+                const vsIdx = p.dataset.vsIndex != null ? parseInt(p.dataset.vsIndex, 10) : idx;
+                if (!matchIndexSet.has(vsIdx)) {
+                    p.style.display = "none";
+                    p.dataset.tsbHidden = "1";
+                    return;
+                }
+
+                // 텍스트 하이라이트
+                if (regex) {
+                    const textSpan = p.querySelector(".text");
+                    if (!textSpan) return;
+
+                    const walker = document.createTreeWalker(textSpan, NodeFilter.SHOW_TEXT, null, false);
+                    const textNodes = [];
+                    let node;
+                    while ((node = walker.nextNode())) textNodes.push(node);
+
+                    textNodes.forEach(textNode => {
+                        const text = textNode.textContent;
+                        if (!regex.test(text)) return;
+                        regex.lastIndex = 0;
+
+                        const fragment = document.createDocumentFragment();
+                        let lastIndex = 0;
+                        let match;
+                        while ((match = regex.exec(text)) !== null) {
+                            if (match[0].length === 0) { regex.lastIndex++; continue; }
+                            searchMatchCount++;
+                            if (match.index > lastIndex) {
+                                fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                            }
+                            const mark = document.createElement("mark");
+                            mark.textContent = match[0];
+                            mark.dataset.searchIndex = String(searchMatchCount - 1);
+                            fragment.appendChild(mark);
+                            lastIndex = regex.lastIndex;
+                        }
+                        if (lastIndex < text.length) {
+                            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                        }
+                        textNode.parentNode.replaceChild(fragment, textNode);
+                    });
+                }
+            });
+
+            // 네비게이션 바
+            navBar.classList.add("visible");
+            if (searchMatchCount > 0) {
+                navCounter.textContent = `0/${searchMatchCount}`;
+                navigateSearch(1);
+            } else {
+                navCounter.textContent = "0/0";
+            }
+
+            // 결과 안내
+            const info = document.createElement("div");
+            info.className = "search-result-info";
+            info.setAttribute("role", "status");
+            info.setAttribute("aria-live", "polite");
+            info.style.cssText = "padding:8px 12px;font-size:var(--text-xs);color:var(--text-tertiary);text-align:center;";
+            const visibleCount = matches.length;
+            const parts = [];
+            if (searchMatchCount > 0) parts.push(`${searchMatchCount}건 일치`);
+            else if (query) parts.push(`"${query}"에 대한 검색 결과 없음`);
+            parts.push(`${visibleCount}개 행 표시 (서버 검색)`);
+            info.textContent = parts.join(" · ");
+            transcript.insertBefore(info, transcript.firstChild);
+        }
+
+        /* === 통합 전사 검색 + 필터 실행 === */
+        function runTranscriptSearch() {
+            const query = tsbInputEl.value.trim();
+            const speakerFilter = tsbSpeakerSelect.value.trim().toUpperCase();
+            const timeStartSec = parseTimeToSeconds(tsbTimeStart.value);
+            const timeEndSec = parseTimeToSeconds(tsbTimeEnd.value);
+            const hasTimeFilter = !isNaN(timeStartSec) || !isNaN(timeEndSec);
+            const hasSpeakerFilter = Boolean(speakerFilter);
+
+            updateFilterBadge();
+
+            // 정규식 에러 초기화
+            tsbRegexError.classList.remove("visible");
+            tsbRegexError.textContent = "";
+            tsbInputEl.classList.remove("regex-error");
+
+            const hasAnyFilter = Boolean(query) || hasSpeakerFilter || hasTimeFilter;
+
+            // 서버 사이드 검색 분기: 세그먼트 1000개 초과 + 과거 세션 + 필터 존재
+            if (shouldUseServerSearch() && (query || hasSpeakerFilter || hasTimeFilter)) {
+                _runServerSearchWithUI(query, {
+                    regexMode: tsbRegexMode,
+                    speakerFilter,
+                    timeStartSec,
+                    timeEndSec,
+                });
+                return;
+            }
+
+            // 클라이언트 사이드 검색 (소규모 세션 또는 실시간)
+            highlightTranscript(query, {
+                regexMode: tsbRegexMode,
+                speakerFilter,
+                timeStartSec,
+                timeEndSec,
+                hasTimeFilter,
+                hasSpeakerFilter,
+            });
+        }
+
+        /* 서버 검색 + 로딩/에러 UI 래퍼 */
+        async function _runServerSearchWithUI(query, opts) {
+            const transcript = document.getElementById("transcript");
+
+            // 로딩 표시
+            let loadingEl = transcript.querySelector(".search-loading-indicator");
+            if (!loadingEl) {
+                loadingEl = document.createElement("div");
+                loadingEl.className = "search-loading-indicator";
+                loadingEl.setAttribute("role", "status");
+                loadingEl.setAttribute("aria-live", "polite");
+                loadingEl.style.cssText = "padding:12px;text-align:center;font-size:var(--text-sm);color:var(--text-secondary);";
+            }
+            loadingEl.textContent = "서버에서 검색 중...";
+            if (!loadingEl.parentNode) transcript.insertBefore(loadingEl, transcript.firstChild);
+
+            try {
+                const data = await runServerSearch(query, opts);
+                renderServerSearchResults(data, query, opts);
+            } catch (err) {
+                // AbortError는 새 검색으로 대체된 것이므로 무시
+                if (err.name === "AbortError") return;
+
+                // 서버 검색 실패 시 클라이언트 사이드로 폴백
+                console.warn("[검색] 서버 검색 실패, 클라이언트 폴백:", err.message);
+                if (loadingEl.parentNode) loadingEl.remove();
+
+                // 정규식 에러인 경우 UI에 표시
+                if (err.message.includes("정규식")) {
+                    tsbRegexError.textContent = err.message;
+                    tsbRegexError.classList.add("visible");
+                    tsbInputEl.classList.add("regex-error");
+                    return;
+                }
+
+                highlightTranscript(query, {
+                    regexMode: opts.regexMode,
+                    speakerFilter: opts.speakerFilter,
+                    timeStartSec: opts.timeStartSec,
+                    timeEndSec: opts.timeEndSec,
+                    hasTimeFilter: !isNaN(opts.timeStartSec) || !isNaN(opts.timeEndSec),
+                    hasSpeakerFilter: Boolean(opts.speakerFilter),
+                });
+            }
+        }
+
+        /* === 전사 텍스트 검색 하이라이트 (네비게이션 + 필터 포함) === */
+        function highlightTranscript(query, opts = {}) {
+            const transcript = document.getElementById("transcript");
+            if (!transcript) return;
+
+            const {
+                regexMode = false,
+                speakerFilter = "",
+                timeStartSec = NaN,
+                timeEndSec = NaN,
+                hasTimeFilter = false,
+                hasSpeakerFilter = false,
+            } = opts;
 
             // 가상 스크롤 활성 시 전체 DOM 복원 후 검색
             const wasVirtualScrollEnabled = VirtualScroll.enabled;
@@ -4073,6 +4954,12 @@
             const oldInfo = transcript.querySelector(".search-result-info");
             if (oldInfo) oldInfo.remove();
 
+            // 필터에 의해 숨겨진 행 복원
+            transcript.querySelectorAll("p[data-tsb-hidden]").forEach(p => {
+                p.style.display = "";
+                delete p.dataset.tsbHidden;
+            });
+
             // 검색 상태 리셋
             searchMatchCount = 0;
             searchCurrentIndex = -1;
@@ -4080,8 +4967,11 @@
             const navBar = document.getElementById("search-nav-bar");
             const navCounter = document.getElementById("search-nav-counter");
 
-            if (!query) {
-                // 검색 해제 시 가상 스크롤 재활성
+            const hasQuery = Boolean(query);
+            const hasAnyFilter = hasQuery || hasSpeakerFilter || hasTimeFilter;
+
+            if (!hasAnyFilter) {
+                // 검색/필터 해제 시 가상 스크롤 재활성
                 if (wasVirtualScrollEnabled) {
                     VirtualScroll.activate();
                 }
@@ -4089,58 +4979,113 @@
                 return;
             }
 
-            // 대소문자 무시 정규식 생성 (특수문자 이스케이프)
-            const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            const regex = new RegExp(escaped, "gi");
+            // 정규식 생성
+            let regex = null;
+            if (hasQuery) {
+                try {
+                    if (regexMode) {
+                        regex = new RegExp(query, "gi");
+                    } else {
+                        const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                        regex = new RegExp(escaped, "gi");
+                    }
+                } catch (err) {
+                    // 정규식 에러 표시
+                    tsbRegexError.textContent = `정규식 오류: ${err.message}`;
+                    tsbRegexError.classList.add("visible");
+                    tsbInputEl.classList.add("regex-error");
+                    if (wasVirtualScrollEnabled) {
+                        VirtualScroll.activate();
+                    }
+                    navBar.classList.remove("visible");
+                    return;
+                }
+            }
 
-            // .text 요소들에서 텍스트 노드를 찾아 하이라이트
-            const textSpans = transcript.querySelectorAll(".text");
-            textSpans.forEach(span => {
-                const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT, null, false);
-                const textNodes = [];
-                let node;
-                while ((node = walker.nextNode())) {
-                    textNodes.push(node);
+            // 각 행에 대해 필터 적용 + 하이라이트
+            const allParagraphs = transcript.querySelectorAll("p[data-speaker]");
+            allParagraphs.forEach(p => {
+                const pSpeaker = (p.dataset.speaker || "").trim().toUpperCase();
+                const tsEl = p.querySelector(".timestamp");
+                const tsText = tsEl ? tsEl.textContent : "";
+                const pStartSec = extractStartSeconds(tsText);
+
+                // 화자 필터
+                if (hasSpeakerFilter && pSpeaker !== speakerFilter) {
+                    p.style.display = "none";
+                    p.dataset.tsbHidden = "1";
+                    return;
                 }
 
-                textNodes.forEach(textNode => {
-                    const text = textNode.textContent;
-                    if (!regex.test(text)) return;
-                    regex.lastIndex = 0;
+                // 시간대 필터
+                if (hasTimeFilter && !isNaN(pStartSec)) {
+                    if (!isNaN(timeStartSec) && pStartSec < timeStartSec) {
+                        p.style.display = "none";
+                        p.dataset.tsbHidden = "1";
+                        return;
+                    }
+                    if (!isNaN(timeEndSec) && pStartSec > timeEndSec) {
+                        p.style.display = "none";
+                        p.dataset.tsbHidden = "1";
+                        return;
+                    }
+                }
 
-                    const fragment = document.createDocumentFragment();
-                    let lastIndex = 0;
-                    let match;
+                // 텍스트 검색 하이라이트
+                if (regex) {
+                    const textSpan = p.querySelector(".text");
+                    if (!textSpan) return;
 
-                    while ((match = regex.exec(text)) !== null) {
-                        searchMatchCount++;
-                        if (match.index > lastIndex) {
-                            fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                    const walker = document.createTreeWalker(textSpan, NodeFilter.SHOW_TEXT, null, false);
+                    const textNodes = [];
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        textNodes.push(node);
+                    }
+
+                    textNodes.forEach(textNode => {
+                        const text = textNode.textContent;
+                        if (!regex.test(text)) return;
+                        regex.lastIndex = 0;
+
+                        const fragment = document.createDocumentFragment();
+                        let lastIndex = 0;
+                        let match;
+
+                        while ((match = regex.exec(text)) !== null) {
+                            if (match[0].length === 0) { regex.lastIndex++; continue; }
+                            searchMatchCount++;
+                            if (match.index > lastIndex) {
+                                fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                            }
+                            const mark = document.createElement("mark");
+                            mark.textContent = match[0];
+                            mark.dataset.searchIndex = String(searchMatchCount - 1);
+                            fragment.appendChild(mark);
+                            lastIndex = regex.lastIndex;
                         }
-                        const mark = document.createElement("mark");
-                        mark.textContent = match[0];
-                        mark.dataset.searchIndex = String(searchMatchCount - 1);
-                        fragment.appendChild(mark);
-                        lastIndex = regex.lastIndex;
-                    }
 
-                    if (lastIndex < text.length) {
-                        fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
-                    }
+                        if (lastIndex < text.length) {
+                            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                        }
 
-                    textNode.parentNode.replaceChild(fragment, textNode);
-                });
+                        textNode.parentNode.replaceChild(fragment, textNode);
+                    });
+                }
             });
 
             // 네비게이션 바 표시/숨김
-            if (searchMatchCount > 0) {
+            if (hasQuery) {
                 navBar.classList.add("visible");
-                navCounter.textContent = `0/${searchMatchCount}`;
-                // 첫 번째 결과로 자동 이동
-                navigateSearch(1);
+                if (searchMatchCount > 0) {
+                    navCounter.textContent = `0/${searchMatchCount}`;
+                    navigateSearch(1);
+                } else {
+                    navCounter.textContent = "0/0";
+                }
             } else {
-                navBar.classList.add("visible");
-                navCounter.textContent = "0/0";
+                // 필터만 사용 중이면 네비게이션 숨김
+                navBar.classList.remove("visible");
             }
 
             // 검색 결과 안내
@@ -4149,12 +5094,17 @@
             info.setAttribute("role", "status");
             info.setAttribute("aria-live", "polite");
             info.style.cssText = "padding:8px 12px;font-size:var(--text-xs);color:var(--text-tertiary);text-align:center;";
-            if (searchMatchCount > 0) {
-                info.textContent = `${searchMatchCount}건 일치`;
-            } else {
-                info.textContent = `"${query}"에 대한 검색 결과가 없습니다`;
+
+            const visibleCount = transcript.querySelectorAll("p[data-speaker]:not([data-tsb-hidden])").length;
+            const parts = [];
+            if (hasQuery && searchMatchCount > 0) parts.push(`${searchMatchCount}건 일치`);
+            else if (hasQuery) parts.push(`"${query}"에 대한 검색 결과 없음`);
+            if (hasSpeakerFilter || hasTimeFilter) parts.push(`${visibleCount}개 행 표시`);
+            info.textContent = parts.join(" · ");
+
+            if (parts.length > 0) {
+                transcript.insertBefore(info, transcript.firstChild);
             }
-            transcript.insertBefore(info, transcript.firstChild);
         }
 
         /* === 검색 결과 네비게이션 === */
@@ -4189,11 +5139,26 @@
             navCounter.textContent = `${searchCurrentIndex + 1}/${searchMatchCount}`;
         }
 
-        /* === 검색 초기화 === */
+        /* === 전사 검색 초기화 === */
+        function clearTranscriptSearch() {
+            tsbInputEl.value = "";
+            tsbSpeakerSelect.value = "";
+            tsbTimeStart.value = "";
+            tsbTimeEnd.value = "";
+            tsbRegexMode = false;
+            tsbRegexToggle.setAttribute("aria-pressed", "false");
+            tsbInputEl.classList.remove("regex-active", "regex-error");
+            tsbRegexError.classList.remove("visible");
+            tsbRegexError.textContent = "";
+            highlightTranscript("");
+            updateFilterBadge();
+        }
+
+        /* === 세션/사이드바 검색 초기화 (기존 호환) === */
         function clearSearch() {
             const input = document.getElementById("session-search-input");
             if (input) input.value = "";
-            highlightTranscript("");
+            clearTranscriptSearch();
             loadSessionList();
         }
 
@@ -4206,6 +5171,9 @@
         // 날짜 필터 변경 시 즉시 검색
         document.getElementById("session-date-from").addEventListener("change", () => loadSessionList());
         document.getElementById("session-date-to").addEventListener("change", () => loadSessionList());
+
+        // 초기에 검색 바 표시 (Ctrl+F 안내용)
+        showTranscriptSearchBar();
 
         /* === SSE 세션 이벤트 리스너 등록 === */
         function attachSessionSSEListeners(eventSource) {
@@ -4233,7 +5201,11 @@
         loadAudioDevices(true);
         loadSessionList();
         loadHistory().finally(() => {
-            connectStream();
+            if (useWebSocket) {
+                connectWebSocket();
+            } else {
+                connectStream();
+            }
         });
         (function poll() {
             refreshStatus();

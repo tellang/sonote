@@ -1,12 +1,12 @@
 [project]
-name = "media-transcriber"
+name = "sonote"
 version = "1.1.0b1"
-description = "스트림/회의/오디오 한국어 음성 인식(STT) 도구"
+description = "AI 에이전트를 위한 소리 노트 — 실시간 한국어 음성 전사 CLI"
 requires-python = ">=3.11"
 authors = [{ name = "tellang" }]
 license = { text = "MIT" }
 readme = "README.md"
-keywords = ["whisper", "stt", "korean", "transcription", "faster-whisper", "meeting", "live-stream"]
+keywords = ["sonote", "whisper", "stt", "korean", "transcription", "faster-whisper", "meeting", "live-stream", "ai-agent"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -38,12 +38,12 @@ pdf = [
 ]
 
 [project.scripts]
-media-transcriber = "src.cli:main"
+sonote = "src.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/tellang/media-transcriber"
-Repository = "https://github.com/tellang/media-transcriber"
-Issues = "https://github.com/tellang/media-transcriber/issues"
+Homepage = "https://github.com/tellang/sonote"
+Repository = "https://github.com/tellang/sonote"
+Issues = "https://github.com/tellang/sonote/issues"
 
 [build-system]
 requires = ["setuptools>=75.0"]
