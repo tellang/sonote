@@ -1,0 +1,1246 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import threading
+import time
+from contextlib import asynccontextmanager
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+from .paths import OUTPUT_ROOT
+
+# SSE 브로드캐스트 — 클라이언트별 큐
+_client_queues: set[asyncio.Queue[dict]] = set()
+
+# 전사 내역 누적 (새로고침 시 제공용)
+_transcript_history: list[dict] = []
+
+# 서버 시작 시각 (경과시간 계산용)
+_start_time: float = 0.0
+_segment_count: int = 0
+_speakers: set[str] = set()
+_event_loop: asyncio.AbstractEventLoop | None = None
+_paused: bool = False
+_manual_keywords: set[str] = set()
+_extracted_keywords: set[str] = set()
+_promoted_keywords: set[str] = set()
+_blocked_keywords: set[str] = set()
+_keyword_seen_counts: dict[str, int] = {}
+_kw_lock = threading.Lock()
+_shutdown_requested: bool = False
+_postprocess_phase: str = ""
+_postprocess_progress: float = 0.0
+_diarizer = None  # SpeakerDiarizer 참조 (cli.py에서 설정)
+_profiles_path: str | None = None
+_api_key: str = (os.getenv("MEETING_API_KEY") or "").strip()
+_audio_device_lock = threading.Lock()
+_current_audio_device: int | None = None
+_requested_audio_device: int | None = None
+_audio_device_switching: bool = False
+_audio_device_error: str = ""
+_audio_device_switch_event = threading.Event()
+_startup_phase: str = ""
+_startup_message: str = ""
+_startup_ready: bool = False
+_postprocess_status_file: str | None = None
+
+# 세션 회전 상태 — threading.Event로 스레드 안전 보장
+_session_rotate_event = threading.Event()
+_session_rotate_callback: Callable[[], None] | None = None
+_session_observer: "Observer | None" = None  # type: ignore[valid-type]
+
+_SESSION_ID_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}")
+_SESSION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_SESSION_TIME_RE = re.compile(r"\d{6}")
+
+
+async def _broadcast_item(item: dict) -> None:
+    """모든 연결된 SSE 클라이언트에 이벤트 아이템을 전송한다."""
+    for q in list(_client_queues):
+        try:
+            q.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
+
+
+async def _broadcast_sse(event_type: str, payload: dict) -> None:
+    await _broadcast_item({"_type": event_type, "_payload": payload})
+
+
+def _broadcast_sse_sync(event_type: str, payload: dict) -> None:
+    """watchdog 스레드에서 SSE 브로드캐스트를 예약한다."""
+    if _event_loop is not None and _event_loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_sse(event_type, payload),
+            _event_loop,
+        )
+
+
+def _session_payload(
+    session_id: str,
+    session_dir: Path,
+    *,
+    changed_file: Path | None = None,
+) -> dict:
+    date_str, time_str = session_id.split("_", 1)
+    payload = {
+        "session_id": session_id,
+        "date": date_str,
+        "time": time_str,
+        "path": str(session_dir),
+    }
+    if changed_file is not None:
+        payload["file"] = str(changed_file)
+    return payload
+
+
+def _session_id_from_parts(parts: tuple[str, ...]) -> str | None:
+    if len(parts) < 2:
+        return None
+    date_str, time_str = parts[0], parts[1]
+    if not _SESSION_DATE_RE.fullmatch(date_str):
+        return None
+    if not _SESSION_TIME_RE.fullmatch(time_str):
+        return None
+    return f"{date_str}_{time_str}"
+
+
+def _session_info_from_path(path: str | Path) -> tuple[str, Path, Path | None] | None:
+    meetings_root = (OUTPUT_ROOT / "meetings").resolve()
+    resolved = Path(path).resolve()
+    try:
+        relative_parts = resolved.relative_to(meetings_root).parts
+    except ValueError:
+        return None
+
+    session_id = _session_id_from_parts(relative_parts)
+    if session_id is None:
+        return None
+
+    session_dir = meetings_root / relative_parts[0] / relative_parts[1]
+    changed_file = resolved if len(relative_parts) > 2 else None
+    return session_id, session_dir, changed_file
+
+
+def _resolve_session_dir(session_id: str) -> tuple[Path, Path]:
+    """세션 ID를 안전한 실제 경로로 변환한다."""
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        raise HTTPException(status_code=400, detail="세션 ID 형식이 올바르지 않습니다.")
+
+    date_str, time_str = session_id.split("_", 1)
+    session_dir = (OUTPUT_ROOT / "meetings" / date_str / time_str).resolve()
+    meetings_root = (OUTPUT_ROOT / "meetings").resolve()
+    if not str(session_dir).startswith(str(meetings_root)):
+        raise HTTPException(status_code=400, detail="잘못된 세션 경로입니다.")
+    return session_dir, meetings_root
+
+
+class _SessionWatchHandler(FileSystemEventHandler):
+    """output/meetings 하위 세션 생성/변경을 SSE로 브로드캐스트한다."""
+
+    def _broadcast_session_created(self, path: str) -> None:
+        info = _session_info_from_path(path)
+        if info is None:
+            return
+        session_id, session_dir, changed_file = info
+        if changed_file is not None:
+            return
+        _broadcast_sse_sync("session_created", _session_payload(session_id, session_dir))
+
+    def _broadcast_session_updated(self, path: str) -> None:
+        info = _session_info_from_path(path)
+        if info is None:
+            return
+        session_id, session_dir, changed_file = info
+        if changed_file is None:
+            return
+        _broadcast_sse_sync(
+            "session_updated",
+            _session_payload(session_id, session_dir, changed_file=changed_file),
+        )
+
+    def on_created(self, event) -> None:
+        if event.is_directory:
+            self._broadcast_session_created(event.src_path)
+            return
+        self._broadcast_session_updated(event.src_path)
+
+    def on_modified(self, event) -> None:
+        if event.is_directory:
+            return
+        self._broadcast_session_updated(event.src_path)
+
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            self._broadcast_session_created(event.dest_path)
+            return
+        self._broadcast_session_updated(event.dest_path)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """이벤트 루프를 캡처하고 watchdog observer를 서버 생명주기에 맞춰 관리한다."""
+    global _start_time, _event_loop, _session_observer
+
+    _start_time = time.time()
+    _event_loop = asyncio.get_running_loop()
+
+    meetings_root = OUTPUT_ROOT / "meetings"
+    meetings_root.mkdir(parents=True, exist_ok=True)
+
+    observer = Observer()
+    observer.schedule(_SessionWatchHandler(), str(meetings_root), recursive=True)
+    observer.start()
+    _session_observer = observer
+
+    try:
+        yield
+    finally:
+        observer.stop()
+        observer.join(timeout=5.0)
+        _session_observer = None
+
+
+app = FastAPI(title="회의 실시간 전사", lifespan=lifespan)
+
+
+def is_session_rotate_requested() -> bool:
+    """세션 회전 요청 상태 반환."""
+    return _session_rotate_event.is_set()
+
+
+def consume_session_rotate() -> bool:
+    """세션 회전 요청을 소비 (1회성). 요청이 있었으면 True."""
+    if _session_rotate_event.is_set():
+        _session_rotate_event.clear()
+        return True
+    return False
+
+
+def set_session_rotate_callback(callback: Callable[[], None]) -> None:
+    """CLI에서 세션 회전 시 호출할 콜백 등록."""
+    global _session_rotate_callback
+    _session_rotate_callback = callback
+
+
+def _verify_api_key(request: Request) -> None:
+    """MEETING_API_KEY가 설정된 경우 보호 엔드포인트 인증."""
+    if not _api_key:
+        return
+    provided = request.headers.get("x-api-key") or request.query_params.get("api_key")
+    if provided != _api_key:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _normalize_keyword(keyword: str) -> str:
+    keyword = re.sub(r"\s+", " ", (keyword or "").strip(" ,.;:/"))
+    if len(keyword) < 2:
+        return ""
+    return keyword
+
+
+def _list_input_devices() -> list[dict]:
+    from .audio_capture import list_audio_devices
+
+    return list_audio_devices()
+
+
+def _resolve_device_name(device: int | None, devices: list[dict]) -> str:
+    if device is None:
+        return "기본 장치"
+    for info in devices:
+        if info.get("index") == device:
+            return str(info.get("name") or f"장치 {device}")
+    return f"장치 {device}"
+
+
+def _audio_device_payload(devices: list[dict] | None = None) -> dict:
+    if devices is None:
+        devices = _list_input_devices()
+    with _audio_device_lock:
+        current = _current_audio_device
+        requested = _requested_audio_device
+        switching = _audio_device_switching
+        error = _audio_device_error
+    return {
+        "devices": devices,
+        "current_device": current,
+        "current_name": _resolve_device_name(current, devices),
+        "requested_device": requested,
+        "requested_name": _resolve_device_name(requested, devices),
+        "switching": switching,
+        "error": error,
+    }
+
+
+def set_current_audio_device(device: int | None, error: str = "") -> None:
+    global _current_audio_device, _requested_audio_device, _audio_device_switching, _audio_device_error
+    with _audio_device_lock:
+        _current_audio_device = device
+        _requested_audio_device = None
+        _audio_device_switching = False
+        _audio_device_error = error
+        _audio_device_switch_event.clear()
+
+
+def request_audio_device_switch(device: int | None) -> bool:
+    global _requested_audio_device, _audio_device_switching, _audio_device_error
+    with _audio_device_lock:
+        if not _audio_device_switching and device == _current_audio_device:
+            _audio_device_error = ""
+            return False
+        _requested_audio_device = device
+        _audio_device_switching = True
+        _audio_device_error = ""
+        _audio_device_switch_event.set()
+        return True
+
+
+def consume_audio_device_switch() -> tuple[bool, int | None]:
+    with _audio_device_lock:
+        if not _audio_device_switch_event.is_set():
+            return False, None
+        return True, _requested_audio_device
+
+
+def get_audio_device_switch_event() -> threading.Event:
+    return _audio_device_switch_event
+
+
+def set_startup_status(phase: str, message: str = "", ready: bool = False) -> None:
+    global _startup_phase, _startup_message, _startup_ready
+    _startup_phase = phase
+    _startup_message = message
+    _startup_ready = ready
+
+
+def _keyword_payload() -> dict:
+    extracted = sorted(
+        kw for kw in _extracted_keywords
+        if kw not in _manual_keywords and kw not in _promoted_keywords
+    )
+    manual = sorted(_manual_keywords)
+    promoted = sorted(_promoted_keywords)
+    visible = sorted(set(manual) | set(promoted) | set(extracted))
+    return {
+        "keywords": visible,
+        "prompt_keywords": sorted(get_keywords()),
+        "manual": manual,
+        "promoted": promoted,
+        "extracted": extracted,
+        "blocked": sorted(_blocked_keywords),
+        "counts": {kw: _keyword_seen_counts.get(kw, 0) for kw in extracted},
+    }
+
+
+def add_extracted_keywords(keywords: list[str], promote_threshold: int = 2) -> dict:
+    """자동 추출 키워드를 누적하고 반복 확인된 것만 승격한다."""
+    with _kw_lock:
+        for raw in keywords:
+            keyword = _normalize_keyword(raw)
+            if not keyword or keyword in _blocked_keywords or keyword in _manual_keywords:
+                continue
+            _keyword_seen_counts[keyword] = _keyword_seen_counts.get(keyword, 0) + 1
+            if _keyword_seen_counts[keyword] >= promote_threshold:
+                _promoted_keywords.add(keyword)
+                _extracted_keywords.discard(keyword)
+            elif keyword not in _promoted_keywords:
+                _extracted_keywords.add(keyword)
+    return _keyword_payload()
+
+
+@app.get("/")
+async def index() -> HTMLResponse:
+    """static/viewer.html 읽어서 HTMLResponse 반환"""
+    viewer_path = Path(__file__).resolve().parent.parent / "static" / "viewer.html"
+    html = viewer_path.read_text(encoding="utf-8")
+    return HTMLResponse(content=html)
+
+
+@app.get("/stream")
+async def stream(request: Request) -> StreamingResponse:
+    """SSE 엔드포인트 — text/event-stream
+    각 이벤트: data: {"speaker": "A", "text": "...", "ts": "HH:MM:SS"}\n\n
+    """
+    _verify_api_key(request)
+
+    client_queue: asyncio.Queue[dict] = asyncio.Queue()
+    _client_queues.add(client_queue)
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(client_queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # 연결 유지를 위한 SSE 코멘트 ping
+                    yield ": keep-alive\n\n"
+                    continue
+                except asyncio.CancelledError:
+                    break
+
+                if "_type" in item:
+                    event_type = item["_type"]
+                    payload = item.get("_payload", item)
+                    yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    continue
+
+                payload = {
+                    "speaker": item.get("speaker", "?"),
+                    "text": item.get("text", ""),
+                    "ts": item.get("ts", ""),
+                }
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            _client_queues.discard(client_queue)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
+
+
+@app.get("/history")
+async def history() -> list[dict]:
+    """현재 세션의 전체 전사 내역 반환."""
+    return _transcript_history
+
+
+@app.get("/status")
+async def status() -> dict:
+    """서버 상태 JSON: elapsed, segments, speakers, paused, postprocess"""
+    now = time.time()
+    elapsed = int(now - _start_time) if _start_time > 0 else 0
+    result = {
+        "elapsed": elapsed,
+        "segments": _segment_count,
+        "speakers": sorted(_speakers),
+        "paused": _paused,
+        "keyword_counts": {
+            "manual": len(_manual_keywords),
+            "promoted": len(_promoted_keywords),
+            "extracted": len(_extracted_keywords),
+        },
+    }
+    if _startup_phase or not _startup_ready:
+        result["startup"] = {
+            "phase": _startup_phase or "booting",
+            "message": _startup_message or "회의 세션 준비 중...",
+            "ready": _startup_ready,
+        }
+    if _postprocess_phase:
+        result["postprocess"] = {
+            "phase": _postprocess_phase,
+            "progress": round(_postprocess_progress, 1),
+        }
+    elif _postprocess_status_file:
+        try:
+            pp_text = Path(_postprocess_status_file).read_text(encoding="utf-8")
+            pp_data = json.loads(pp_text)
+            result["postprocess"] = {
+                "phase": pp_data.get("phase", ""),
+                "progress": round(pp_data.get("progress", 0), 1),
+            }
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    return result
+
+
+@app.post("/toggle-pause")
+async def toggle_pause(request: Request) -> dict:
+    """일시정지/재개 토글. 일시정지 시 STT 처리를 건너뛴다."""
+    _verify_api_key(request)
+    global _paused
+    _paused = not _paused
+    state = "paused" if _paused else "recording"
+    return {"paused": _paused, "state": state}
+
+
+@app.post("/add-keyword")
+async def add_keyword(request: Request, body: dict) -> dict:
+    """실시간 키워드 수동 추가 — initial_prompt에 즉시 반영"""
+    _verify_api_key(request)
+    raw_keyword = body.get("keyword")
+    keyword = _normalize_keyword(raw_keyword) if raw_keyword else None
+    if keyword:
+        _blocked_keywords.discard(keyword)
+        _manual_keywords.add(keyword)
+        _extracted_keywords.discard(keyword)
+        _promoted_keywords.discard(keyword)
+    return _keyword_payload()
+
+
+@app.post("/remove-keyword")
+async def remove_keyword(request: Request, body: dict) -> dict:
+    """실시간 키워드 삭제 — 자동 추출 재유입도 막는다."""
+    _verify_api_key(request)
+    raw_keyword = body.get("keyword")
+    keyword = _normalize_keyword(raw_keyword) if raw_keyword else None
+    if keyword:
+        _manual_keywords.discard(keyword)
+        _extracted_keywords.discard(keyword)
+        _promoted_keywords.discard(keyword)
+        _blocked_keywords.add(keyword)
+        _keyword_seen_counts.pop(keyword, None)
+    return _keyword_payload()
+
+
+@app.get("/keywords")
+async def list_keywords() -> dict:
+    """현재 등록된 키워드 목록과 상태를 반환."""
+    return _keyword_payload()
+
+
+@app.get("/devices")
+async def list_devices() -> dict:
+    """사용 가능한 입력 장치와 현재 선택 상태를 반환."""
+    return _audio_device_payload()
+
+
+@app.post("/switch-device")
+async def switch_device(request: Request, body: dict) -> dict:
+    """마이크 입력 장치 전환 요청을 등록한다."""
+    _verify_api_key(request)
+    raw_device = body.get("device")
+    if raw_device in ("", "default"):
+        device = None
+    else:
+        try:
+            device = None if raw_device is None else int(raw_device)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="장치 인덱스가 올바르지 않습니다.") from exc
+
+    devices = _list_input_devices()
+    valid_indexes = {info["index"] for info in devices}
+    if device is not None and device not in valid_indexes:
+        raise HTTPException(status_code=400, detail="선택한 입력 장치를 찾을 수 없습니다.")
+
+    request_audio_device_switch(device)
+    return _audio_device_payload(devices)
+
+
+def is_paused() -> bool:
+    """현재 일시정지 상태인지 반환 (CLI 루프에서 참조)."""
+    return _paused
+
+
+def get_keywords() -> set[str]:
+    """현재 initial_prompt에 반영할 활성 키워드 집합 반환."""
+    return _manual_keywords.union(_promoted_keywords)
+
+
+@app.post("/shutdown")
+async def shutdown(request: Request) -> dict:
+    """저장 & 종료 요청. CLI 루프에서 감지하여 graceful shutdown."""
+    _verify_api_key(request)
+    global _shutdown_requested
+    _shutdown_requested = True
+    return {"shutdown": True, "message": "저장 후 종료합니다..."}
+
+
+@app.get("/speakers")
+async def list_speakers(request: Request) -> dict:
+    """등록된 화자 목록 반환."""
+    _verify_api_key(request)
+    if _diarizer is None:
+        return {"speakers": [], "available": False}
+    names = sorted(_diarizer._enrolled_names)
+    return {"speakers": names, "available": True}
+
+
+@app.post("/enroll")
+async def enroll_speaker(request: Request, body: dict) -> dict:
+    """웹 UI에서 화자 등록 — base64 PCM float32 오디오 수신.
+
+    body: {"name": "화자명", "audio": "base64 encoded float32 PCM", "sample_rate": 16000}
+    """
+    _verify_api_key(request)
+    import base64
+    import numpy as np
+
+    if _diarizer is None:
+        return {"ok": False, "error": "화자 분리가 비활성화됨 (--no-diarize)"}
+
+    name = (body.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "이름을 입력해주세요"}
+
+    audio_b64 = body.get("audio", "")
+    if not audio_b64:
+        return {"ok": False, "error": "오디오 데이터가 없습니다"}
+
+    sample_rate = int(body.get("sample_rate", 16000))
+
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        audio = np.frombuffer(audio_bytes, dtype=np.float32)
+    except Exception:
+        return {"ok": False, "error": "오디오 디코딩 실패"}
+
+    if len(audio) < sample_rate * 2:
+        return {"ok": False, "error": "최소 2초 이상 녹음해주세요"}
+
+    # 유사도 기반 중복 검사
+    dup_name, dup_sim = _diarizer.check_duplicate(audio, sample_rate)
+    if dup_name:
+        return {
+            "ok": False,
+            "error": f"'{dup_name}'과(와) 유사합니다 (유사도 {dup_sim:.0%})",
+            "duplicate": dup_name,
+            "similarity": round(dup_sim, 3),
+        }
+
+    # 이름 중복 확인
+    if name in _diarizer._enrolled_names:
+        return {
+            "ok": False,
+            "error": f"'{name}'은(는) 이미 등록되어 있습니다",
+            "duplicate": name,
+        }
+
+    # 등록
+    try:
+        _diarizer.enroll(name, audio, sample_rate)
+        if _profiles_path:
+            _diarizer.save_profiles(_profiles_path)
+        return {
+            "ok": True,
+            "name": name,
+            "speakers": sorted(_diarizer._enrolled_names),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _session_contains_keyword(session_dir: Path, keyword: str) -> bool:
+    """세션의 전사 파일에서 키워드 포함 여부를 확인한다."""
+    for candidate in ("meeting.md", "meeting.raw.txt"):
+        transcript_file = session_dir / candidate
+        if transcript_file.is_file():
+            try:
+                content = transcript_file.read_text(encoding="utf-8").lower()
+                return keyword in content
+            except OSError:
+                pass
+            break
+
+    # JSONL 파일에서도 검색
+    jsonl_file = session_dir / "meeting.stt.jsonl"
+    if jsonl_file.is_file():
+        try:
+            for line in jsonl_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    seg = json.loads(line)
+                    if keyword in str(seg.get("text", "")).lower():
+                        return True
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        except OSError:
+            pass
+
+    return False
+
+
+def _scan_sessions() -> list[dict]:
+    """output/meetings 디렉토리를 스캔하여 세션 메타데이터 목록을 반환한다."""
+    meetings_root = OUTPUT_ROOT / "meetings"
+    if not meetings_root.is_dir():
+        return []
+
+    sessions: list[dict] = []
+    for date_dir in meetings_root.iterdir():
+        if not date_dir.is_dir():
+            continue
+        date_str = date_dir.name  # YYYY-MM-DD
+        for time_dir in date_dir.iterdir():
+            if not time_dir.is_dir():
+                continue
+            time_str = time_dir.name  # HHMMSS
+            session_id = f"{date_str}_{time_str}"
+
+            session_json = time_dir / "session.json"
+            if session_json.is_file():
+                # session.json이 있으면 메타데이터 사용
+                try:
+                    meta = json.loads(session_json.read_text(encoding="utf-8"))
+                    sessions.append({
+                        "id": session_id,
+                        "date": date_str,
+                        "time": time_str,
+                        "duration": meta.get("duration", ""),
+                        "segments": meta.get("segment_count", 0),
+                        "speakers": meta.get("speaker_count", 0),
+                        "path": str(time_dir),
+                    })
+                    continue
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # 폴백: 디렉토리 구조 + transcript 파일에서 추출
+            segment_count = 0
+            for candidate in ("meeting.md", "meeting.raw.txt"):
+                transcript_file = time_dir / candidate
+                if transcript_file.is_file():
+                    try:
+                        lines = transcript_file.read_text(encoding="utf-8").splitlines()
+                        segment_count = sum(
+                            1 for ln in lines if ln.startswith("- [")
+                        )
+                    except OSError:
+                        pass
+                    break
+
+            sessions.append({
+                "id": session_id,
+                "date": date_str,
+                "time": time_str,
+                "duration": "",
+                "segments": segment_count,
+                "speakers": 0,
+                "path": str(time_dir),
+            })
+
+    # 최신순 정렬
+    sessions.sort(key=lambda s: s["id"], reverse=True)
+    return sessions
+
+
+@app.get("/api/sessions")
+async def list_sessions(
+    request: Request,
+    q: str | None = Query(None, description="키워드 검색 (세그먼트 text 필드)"),
+    from_date: str | None = Query(None, description="시작 날짜 (YYYY-MM-DD)"),
+    to_date: str | None = Query(None, description="종료 날짜 (YYYY-MM-DD)"),
+) -> list[dict]:
+    """세션 목록 반환. output/meetings/{date}/{time} 스캔.
+
+    쿼리 파라미터:
+      - q: 키워드 검색 — 전사 텍스트에서 해당 키워드를 포함하는 세션만 반환
+      - from_date: 시작 날짜 필터 (YYYY-MM-DD, 이상)
+      - to_date: 종료 날짜 필터 (YYYY-MM-DD, 이하)
+    파라미터 없으면 전체 반환 (하위호환).
+    """
+    _verify_api_key(request)
+    loop = asyncio.get_running_loop()
+    sessions = await loop.run_in_executor(None, _scan_sessions)
+
+    # 날짜 범위 필터링 (세션 디렉토리명 YYYY-MM-DD 기반)
+    if from_date:
+        sessions = [s for s in sessions if s["date"] >= from_date]
+    if to_date:
+        sessions = [s for s in sessions if s["date"] <= to_date]
+
+    # 키워드 검색 — 세그먼트 text 필드에서 검색
+    if q:
+        keyword = q.lower()
+        filtered: list[dict] = []
+        for session in sessions:
+            session_dir = Path(session["path"])
+            if _session_contains_keyword(session_dir, keyword):
+                filtered.append(session)
+        sessions = filtered
+
+    return sessions
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(request: Request, session_id: str) -> dict:
+    """세션 ID로 상세 정보 + 전사 내용 반환.
+
+    session_id 형식: "YYYY-MM-DD_HHMMSS"
+    """
+    _verify_api_key(request)
+    session_dir, _ = _resolve_session_dir(session_id)
+    date_str, time_str = session_id.split("_", 1)
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    # 메타데이터 로드
+    meta: dict = {}
+    session_json = session_dir / "session.json"
+    if session_json.is_file():
+        try:
+            meta = json.loads(session_json.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # 전사 내용 로드 (meeting.md 우선, 폴백으로 meeting.raw.txt)
+    transcript_lines: list[str] = []
+    transcript_source = ""
+    for candidate in ("meeting.md", "meeting.raw.txt"):
+        transcript_file = session_dir / candidate
+        if transcript_file.is_file():
+            try:
+                transcript_lines = transcript_file.read_text(encoding="utf-8").splitlines()
+                transcript_source = candidate
+            except OSError:
+                pass
+            break
+
+    # alignment 로드 (있으면)
+    alignment: list[dict] = []
+    alignment_file = session_dir / "meeting.stt.jsonl"
+    if alignment_file.is_file():
+        try:
+            for line in alignment_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    alignment.append(json.loads(line))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return {
+        "id": session_id,
+        "date": date_str,
+        "time": time_str,
+        "duration": meta.get("duration", ""),
+        "segments": meta.get("segment_count", 0),
+        "speakers": meta.get("speaker_count", 0),
+        "transcript_source": transcript_source,
+        "transcript": transcript_lines,
+        "alignment": alignment,
+        "meta": meta,
+    }
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(request: Request, session_id: str) -> dict:
+    """세션 디렉토리를 삭제하고 session_deleted SSE 이벤트를 전송한다."""
+    _verify_api_key(request)
+
+    session_dir, _ = _resolve_session_dir(session_id)
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    shutil.rmtree(session_dir)
+    await _broadcast_sse("session_deleted", _session_payload(session_id, session_dir))
+    return {"deleted": True, "session_id": session_id}
+
+
+@app.get("/api/sessions/{session_id}/export", response_model=None)
+async def export_session_endpoint(
+    request: Request,
+    session_id: str,
+    format: str = Query("txt", description="내보내기 포맷 (txt, md, docx 또는 pdf)"),
+) -> PlainTextResponse | StreamingResponse:
+    """세션 전사 내용을 TXT/MD/DOCX/PDF 포맷으로 내보낸다."""
+    _verify_api_key(request)
+
+    fmt = format.lower()
+    if fmt not in ("txt", "md", "docx", "pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="지원하지 않는 포맷입니다. txt, md, docx 또는 pdf만 가능합니다.",
+        )
+
+    session_dir, _ = _resolve_session_dir(session_id)
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    from .export import export_session
+
+    content = export_session(session_dir, fmt)
+
+    if fmt == "pdf":
+        import io
+        from urllib.parse import quote
+
+        content_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
+        encoded_name = quote(f"회의록_{session_id}.pdf")
+        return StreamingResponse(
+            io.BytesIO(content_bytes),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"meeting_{session_id}.pdf\"; "
+                    f"filename*=UTF-8''{encoded_name}"
+                ),
+            },
+        )
+
+    if fmt == "docx":
+        import io
+        from urllib.parse import quote
+
+        content_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
+        encoded_name = quote(f"회의록_{session_id}.docx")
+        return StreamingResponse(
+            io.BytesIO(content_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"meeting_{session_id}.docx\"; "
+                    f"filename*=UTF-8''{encoded_name}"
+                ),
+            },
+        )
+
+    media_type = "text/markdown" if fmt == "md" else "text/plain"
+    text_content = content if isinstance(content, str) else content.decode("utf-8")
+    return PlainTextResponse(content=text_content, media_type=media_type)
+
+
+def _read_profiles_json() -> dict:
+    """화자 프로필 JSON 파일을 읽어 반환한다. 파일이 없으면 빈 구조 반환."""
+    profiles_file = Path(_profiles_path) if _profiles_path else (OUTPUT_ROOT / "data" / "speakers.json")
+    if not profiles_file.is_file():
+        return {"speakers": {}}
+    try:
+        data = json.loads(profiles_file.read_text(encoding="utf-8"))
+        if "speakers" not in data:
+            data["speakers"] = {}
+        return data
+    except (json.JSONDecodeError, OSError):
+        return {"speakers": {}}
+
+
+def _write_profiles_json(data: dict) -> None:
+    """화자 프로필 JSON 파일에 저장한다."""
+    profiles_file = Path(_profiles_path) if _profiles_path else (OUTPUT_ROOT / "data" / "speakers.json")
+    profiles_file.parent.mkdir(parents=True, exist_ok=True)
+    profiles_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _validate_profile_name(name: str) -> str:
+    """화자 이름 유효성 검사 및 path traversal 방지."""
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="화자 이름은 필수입니다.")
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="잘못된 화자 이름입니다.")
+    return name
+
+
+def _get_audio_duration(file_path: str) -> float:
+    """오디오 파일의 재생 시간(초)을 반환한다. 실패 시 0.0."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-show_entries",
+                "format=duration", "-of", "csv=p=0", file_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+
+    # ffprobe 실패 시 soundfile 시도
+    try:
+        import soundfile as sf
+
+        info = sf.info(file_path)
+        return float(info.duration)
+    except Exception:
+        pass
+
+    return 0.0
+
+
+@app.get("/speaker-profile")
+async def speaker_profile_page() -> FileResponse:
+    """화자 프로필 관리 HTML 페이지 서빙."""
+    html_path = Path(__file__).resolve().parent.parent / "static" / "speaker_profile.html"
+    if not html_path.is_file():
+        raise HTTPException(status_code=404, detail="speaker_profile.html을 찾을 수 없습니다.")
+    return FileResponse(str(html_path), media_type="text/html")
+
+
+@app.get("/api/profiles")
+async def get_profiles(request: Request) -> dict:
+    """전체 화자 프로필 목록 반환."""
+    _verify_api_key(request)
+    data = _read_profiles_json()
+    return data
+
+
+@app.post("/api/profiles")
+async def create_profile(
+    request: Request,
+    name: str = Form(...),
+    audio: UploadFile = File(...),
+    description: str = Form(""),
+) -> dict:
+    """새 화자 프로필 추가. multipart/form-data로 name, audio, description 수신."""
+    _verify_api_key(request)
+    name = _validate_profile_name(name)
+
+    data = _read_profiles_json()
+    if name in data["speakers"]:
+        raise HTTPException(status_code=409, detail=f"'{name}'은(는) 이미 등록된 화자입니다.")
+
+    # 임시 파일로 오디오 저장 후 duration 계산
+
+    audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    # 안전한 파일명 생성
+    ext = Path(audio.filename or "audio.wav").suffix or ".wav"
+    safe_filename = re.sub(r"[^\w\-.]", "_", name) + ext
+    audio_path = audio_dir / safe_filename
+
+    content = await audio.read()
+    audio_path.write_bytes(content)
+
+    duration = _get_audio_duration(str(audio_path))
+
+    data["speakers"][name] = {
+        "embedding": [],
+        "enrolled_at": datetime.now().isoformat(),
+        "duration_seconds": round(duration, 2),
+        "description": description.strip(),
+    }
+    _write_profiles_json(data)
+
+    return {"ok": True, "name": name, "speakers": data["speakers"]}
+
+
+@app.put("/api/profiles/{name}")
+async def update_profile(
+    request: Request,
+    name: str,
+    description: str = Form(None),
+    audio: UploadFile | None = File(None),
+) -> dict:
+    """화자 프로필 수정. description 변경, audio 재업로드(선택)."""
+    _verify_api_key(request)
+    name = _validate_profile_name(name)
+
+    data = _read_profiles_json()
+    if name not in data["speakers"]:
+        raise HTTPException(status_code=404, detail=f"'{name}' 화자를 찾을 수 없습니다.")
+
+    speaker = data["speakers"][name]
+
+    if description is not None:
+        speaker["description"] = description.strip()
+
+    if audio is not None:
+        audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        ext = Path(audio.filename or "audio.wav").suffix or ".wav"
+        safe_filename = re.sub(r"[^\w\-.]", "_", name) + ext
+        audio_path = audio_dir / safe_filename
+
+        content = await audio.read()
+        audio_path.write_bytes(content)
+
+        duration = _get_audio_duration(str(audio_path))
+        speaker["duration_seconds"] = round(duration, 2)
+        speaker["embedding"] = []  # 오디오 변경 시 임베딩 초기화
+
+    _write_profiles_json(data)
+
+    return {"ok": True, "name": name, "speaker": speaker}
+
+
+@app.delete("/api/profiles/{name}")
+async def delete_profile(request: Request, name: str) -> dict:
+    """화자 프로필 삭제."""
+    _verify_api_key(request)
+    name = _validate_profile_name(name)
+
+    data = _read_profiles_json()
+    if name not in data["speakers"]:
+        raise HTTPException(status_code=404, detail=f"'{name}' 화자를 찾을 수 없습니다.")
+
+    del data["speakers"][name]
+    _write_profiles_json(data)
+
+    # 오디오 파일도 정리
+    audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
+    if audio_dir.is_dir():
+        safe_prefix = re.sub(r"[^\w\-.]", "_", name)
+        for f in audio_dir.iterdir():
+            if f.name.startswith(safe_prefix):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+    return {"ok": True, "deleted": name, "speakers": data["speakers"]}
+
+
+@app.post("/api/sessions/new")
+async def new_session(request: Request) -> dict:
+    """현재 세션을 저장하고 새 세션을 시작. 모델은 유지."""
+    _verify_api_key(request)
+
+    # 콜백은 CLI 스레드에서 플래그 감지 시 실행 (async 블로킹 방지)
+    # 서버 상태 리셋
+    _transcript_history.clear()
+    global _segment_count, _start_time
+    _segment_count = 0
+    _speakers.clear()
+    _start_time = time.time()
+
+    # 세션 회전 플래그 설정 (CLI 루프에서 감지 → 콜백 호출)
+    _session_rotate_event.set()
+
+    new_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    return {"session_id": new_id, "message": "새 세션을 시작합니다."}
+
+
+def is_shutdown_requested() -> bool:
+    """종료 요청 상태 반환 (CLI 루프에서 참조)."""
+    return _shutdown_requested
+
+
+def set_diarizer(diarizer, profiles_path: str | None = None) -> None:
+    """화자 분리기 참조 설정 (CLI에서 호출)."""
+    global _diarizer, _profiles_path
+    _diarizer = diarizer
+    _profiles_path = profiles_path
+
+
+def set_postprocess_status(phase: str, progress: float = 0.0) -> None:
+    """후처리 진행 상태 설정 (웹 UI 실시간 표시용)."""
+    global _postprocess_phase, _postprocess_progress
+    _postprocess_phase = phase
+    _postprocess_progress = progress
+
+
+def set_postprocess_status_file(path: str | None) -> None:
+    """파일 기반 후처리 상태 경로 설정 (별도 프로세스용)."""
+    global _postprocess_status_file
+    _postprocess_status_file = path
+
+
+async def push_transcript(speaker: str, text: str, timestamp: str) -> None:
+    """큐에 전사 결과 push (외부에서 호출)"""
+    global _segment_count
+
+    normalized_speaker = (speaker or "?").strip() or "?"
+    normalized_text = (text or "").strip()
+    normalized_timestamp = (timestamp or "").strip()
+
+    if not normalized_timestamp:
+        normalized_timestamp = time.strftime("%H:%M:%S", time.localtime())
+
+    _segment_count += 1
+    _speakers.add(normalized_speaker)
+
+    item = {
+        "speaker": normalized_speaker,
+        "text": normalized_text,
+        "ts": normalized_timestamp,
+    }
+    _transcript_history.append(item)
+    await _broadcast_item(item)
+
+
+async def push_correction(corrections: list[dict]) -> None:
+    """기존 전사 내역을 교정하고 correction SSE 이벤트를 브로드캐스트한다."""
+    normalized_corrections: list[dict] = []
+    for correction in corrections:
+        if not isinstance(correction, dict):
+            continue
+
+        index = correction.get("index")
+        if not isinstance(index, int):
+            continue
+        if index < 0 or index >= len(_transcript_history):
+            continue
+
+        original = str(correction.get("original", ""))
+        corrected = str(correction.get("corrected", ""))
+        if not corrected:
+            continue
+
+        _transcript_history[index]["text"] = corrected
+        normalized_corrections.append(
+            {
+                "index": index,
+                "original": original,
+                "corrected": corrected,
+            }
+        )
+
+    if not normalized_corrections:
+        return
+
+    await _broadcast_sse("correction", {"corrections": normalized_corrections})
+
+
+def push_transcript_sync(speaker: str, text: str, timestamp: str) -> None:
+    """스레드 안전한 동기 래퍼 — 별도 스레드에서 SSE 큐에 push."""
+    if _event_loop is not None and _event_loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            push_transcript(speaker, text, timestamp),
+            _event_loop,
+        )
+
+
+def push_correction_sync(corrections: list[dict]) -> None:
+    if _event_loop is not None and _event_loop.is_running():
+        asyncio.run_coroutine_threadsafe(push_correction(corrections), _event_loop)
+
+
+def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    """uvicorn으로 서버 실행. threading에서 호출할 수 있도록 uvicorn.run() 사용."""
+    import uvicorn
+
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+__all__ = [
+    "app",
+    "index",
+    "stream",
+    "status",
+    "list_devices",
+    "push_transcript",
+    "push_transcript_sync",
+    "push_correction",
+    "push_correction_sync",
+    "run_server",
+    "_client_queues",
+    "is_paused",
+    "add_keyword",
+    "remove_keyword",
+    "list_keywords",
+    "get_keywords",
+    "add_extracted_keywords",
+    "consume_audio_device_switch",
+    "get_audio_device_switch_event",
+    "set_current_audio_device",
+    "set_startup_status",
+    "switch_device",
+    "shutdown",
+    "is_shutdown_requested",
+    "set_postprocess_status",
+    "set_postprocess_status_file",
+    "list_sessions",
+    "get_session",
+    "new_session",
+    "export_session_endpoint",
+    "speaker_profile_page",
+    "get_profiles",
+    "create_profile",
+    "update_profile",
+    "delete_profile",
+    "is_session_rotate_requested",
+    "consume_session_rotate",
+    "set_session_rotate_callback",
+]

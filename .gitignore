@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# 출력 (회의록/전사 결과)
+output/
+
+# AI 도구 설정
+.omc/
+.omx/
+.serena/
+.claude/*
+!.claude/commands/
+CLAUDE.md
+
+# 내부 운영 문서
+prompts/
+docs/session-worklog*.md
+PROJECT_INDEX.md
+
+# 로컬 이슈 트래커
+.issues/
+
+# 임시/중간 파일
+*.part
+.concat_*
+
+# 빌드 출력 (PyInstaller)
+dist/
+build/
+
+# 민감 파일
+.env
+.cookie

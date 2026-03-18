@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>화자 프로필 관리 - media-transcriber</title>
+    <style>
+        /* CSS from viewer.html Design System */
+        :root, :root[data-theme="dark"] {
+            --surface-base:     oklch(0.13 0.01 270);
+            --surface-1:        oklch(0.17 0.012 270);
+            --surface-2:        oklch(0.21 0.014 270);
+            --surface-3:        oklch(0.25 0.016 270);
+
+            --text-primary:     oklch(0.93 0.005 270);
+            --text-secondary:   oklch(0.65 0.01 270);
+            --text-tertiary:    oklch(0.52 0.01 270);
+
+            --accent:           oklch(0.68 0.16 250);
+            --ok:               oklch(0.70 0.15 145);
+            --warn:             oklch(0.75 0.14 75);
+            --danger:           oklch(0.65 0.20 25);
+
+            --speaker-a:        oklch(0.65 0.15 230);
+            --speaker-b:        oklch(0.65 0.15 150);
+            --speaker-c:        oklch(0.65 0.15 70);
+            --speaker-d:        oklch(0.65 0.15 310);
+            --speaker-e:        oklch(0.65 0.15 350);
+            --speaker-f:        oklch(0.65 0.15 185);
+
+            --border:           oklch(0.30 0.01 270 / 0.5);
+            --border-subtle:    oklch(0.30 0.01 270 / 0.25);
+            
+            --overlay-base:     1 0 0;
+            --input-bg:         oklch(0.15 0.01 270 / 0.6);
+
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                         Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: ui-monospace, "SF Mono", "SFMono-Regular",
+                         Menlo, Consolas, monospace;
+
+            --text-xs:    clamp(0.7rem,   0.65rem + 0.25vw,  0.78rem);
+            --text-sm:    clamp(0.82rem,  0.78rem + 0.2vw,   0.9rem);
+            --text-base:  clamp(0.95rem,  0.88rem + 0.35vw,  1.1rem);
+            --text-lg:    clamp(1.1rem,   1rem + 0.5vw,      1.35rem);
+            --text-xl:    clamp(1.4rem,   1.2rem + 1vw,      2rem);
+
+            --dur-fast:   150ms;
+            --dur-normal: 300ms;
+            --dur-slow:   500ms;
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root:not([data-theme="dark"]) {
+                --surface-base:     oklch(0.98 0.005 270);
+                --surface-1:        oklch(0.95 0.01 270);
+                --surface-2:        oklch(0.92 0.015 270);
+                --surface-3:        oklch(0.89 0.02 270);
+
+                --text-primary:     oklch(0.20 0.01 270);
+                --text-secondary:   oklch(0.40 0.01 270);
+                --text-tertiary:    oklch(0.47 0.01 270);
+
+                --accent:           oklch(0.55 0.16 250);
+                --ok:               oklch(0.45 0.15 145);
+                --warn:             oklch(0.55 0.14 75);
+                --danger:           oklch(0.50 0.20 25);
+
+                --speaker-a:        oklch(0.45 0.15 230);
+                --speaker-b:        oklch(0.45 0.15 150);
+                --speaker-c:        oklch(0.45 0.15 70);
+                --speaker-d:        oklch(0.45 0.15 310);
+                --speaker-e:        oklch(0.45 0.15 350);
+                --speaker-f:        oklch(0.45 0.15 185);
+
+                --border:           oklch(0.85 0.01 270 / 0.8);
+                --border-subtle:    oklch(0.85 0.01 270 / 0.4);
+
+                --overlay-base:     0 0 0;
+                --input-bg:         oklch(1 0 0 / 0.6);
+            }
+        }
+        
+        :root[data-theme="light"] {
+            --surface-base:     oklch(0.98 0.005 270);
+            --surface-1:        oklch(0.95 0.01 270);
+            --surface-2:        oklch(0.92 0.015 270);
+            --surface-3:        oklch(0.89 0.02 270);
+
+            --text-primary:     oklch(0.20 0.01 270);
+            --text-secondary:   oklch(0.40 0.01 270);
+            --text-tertiary:    oklch(0.47 0.01 270);
+
+            --accent:           oklch(0.55 0.16 250);
+            --ok:               oklch(0.45 0.15 145);
+            --warn:             oklch(0.55 0.14 75);
+            --danger:           oklch(0.50 0.20 25);
+
+            --speaker-a:        oklch(0.45 0.15 230);
+            --speaker-b:        oklch(0.45 0.15 150);
+            --speaker-c:        oklch(0.45 0.15 70);
+            --speaker-d:        oklch(0.45 0.15 310);
+            --speaker-e:        oklch(0.45 0.15 350);
+            --speaker-f:        oklch(0.45 0.15 185);
+
+            --border:           oklch(0.85 0.01 270 / 0.8);
+            --border-subtle:    oklch(0.85 0.01 270 / 0.4);
+
+            --overlay-base:     0 0 0;
+            --input-bg:         oklch(1 0 0 / 0.6);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html, body {
+            background: var(--surface-base);
+            color: var(--text-primary);
+            font-family: var(--font-sans);
+            font-size: var(--text-base);
+            line-height: 1.5;
+            height: 100%;
+            min-height: 100vh;
+        }
+
+        .page {
+            max-width: 860px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        h1 {
+            font-size: var(--text-xl);
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .glass {
+            background: oklch(var(--overlay-base) / 0.03);
+            backdrop-filter: blur(24px) saturate(150%);
+            -webkit-backdrop-filter: blur(24px) saturate(150%);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 20px;
+            box-shadow: 0 4px 24px -1px oklch(0 0 0 / 0.1);
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-primary);
+            font-size: var(--text-sm);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--dur-fast) var(--ease-out-expo);
+        }
+
+        .btn:hover {
+            background: oklch(var(--overlay-base) / 0.06);
+            transform: translateY(-1px);
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
+
+        .btn-primary:hover {
+            background: color-mix(in oklch, var(--accent) 80%, white);
+        }
+
+        .btn-danger {
+            color: var(--danger);
+            border-color: color-mix(in oklch, var(--danger) 30%, transparent);
+        }
+        
+        .btn-danger:hover {
+            background: color-mix(in oklch, var(--danger) 10%, transparent);
+        }
+
+        /* Speaker List */
+        .speaker-list {
+            display: grid;
+            gap: 12px;
+        }
+
+        .speaker-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px;
+            border-radius: 12px;
+            background: var(--surface-1);
+            border: 1px solid var(--border-subtle);
+            transition: all var(--dur-fast);
+        }
+
+        .speaker-item:hover {
+            background: var(--surface-2);
+            border-color: var(--border);
+        }
+
+        .speaker-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .speaker-name {
+            font-size: var(--text-base);
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .speaker-desc {
+            font-size: var(--text-sm);
+            color: var(--text-secondary);
+        }
+        
+        .speaker-meta {
+            font-size: var(--text-xs);
+            color: var(--text-tertiary);
+            font-family: var(--font-mono);
+        }
+
+        .speaker-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        /* Forms */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            font-size: var(--text-sm);
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .form-control {
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            background: var(--input-bg);
+            color: var(--text-primary);
+            font-size: var(--text-sm);
+            font-family: var(--font-sans);
+            outline: none;
+            transition: border-color var(--dur-fast);
+        }
+
+        .form-control:focus {
+            border-color: var(--accent);
+        }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: oklch(0 0 0 / 0.4);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--dur-normal);
+        }
+
+        .modal-overlay.open {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .modal-container {
+            width: min(90%, 480px);
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: 0 20px 40px oklch(0 0 0 / 0.3);
+            transform: scale(0.95);
+            transition: transform var(--dur-normal) var(--ease-out-expo);
+        }
+
+        .modal-overlay.open .modal-container {
+            transform: scale(1);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-title {
+            font-size: var(--text-lg);
+            font-weight: 700;
+        }
+
+        .close-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-tertiary);
+            font-size: 20px;
+            cursor: pointer;
+        }
+        
+        .close-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            margin-top: 24px;
+        }
+
+        .file-upload-wrapper {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 32px 20px;
+            border: 2px dashed var(--border-subtle);
+            border-radius: 12px;
+            background: var(--surface-1);
+            text-align: center;
+            cursor: pointer;
+            transition: all var(--dur-fast);
+        }
+
+        .file-upload-wrapper:hover, .file-upload-wrapper.dragover {
+            border-color: var(--accent);
+            background: color-mix(in oklch, var(--accent) 5%, var(--surface-1));
+        }
+
+        .file-upload-wrapper input[type="file"] {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+            height: 100%;
+            width: 100%;
+        }
+
+        .upload-icon {
+            font-size: 24px;
+            margin-bottom: 8px;
+            color: var(--text-tertiary);
+        }
+
+        .empty-state {
+            padding: 40px 20px;
+            text-align: center;
+            color: var(--text-tertiary);
+        }
+
+        /* Toast */
+        .toast-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            z-index: 2000;
+        }
+
+        .toast {
+            background: oklch(var(--overlay-base) / 0.03);
+            backdrop-filter: blur(24px) saturate(150%);
+            -webkit-backdrop-filter: blur(24px) saturate(150%);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 16px 20px;
+            color: var(--text-primary);
+            font-size: var(--text-sm);
+            font-weight: 500;
+            box-shadow: 0 10px 30px -5px oklch(0 0 0 / 0.2);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            animation: slideInRight var(--dur-normal) var(--ease-out-expo) forwards;
+        }
+
+        .toast.success { border-left: 4px solid var(--ok); }
+        .toast.error { border-left: 4px solid var(--danger); }
+
+        .toast.hide {
+            animation: slideOutRight var(--dur-normal) var(--ease-out-expo) forwards;
+        }
+
+        @keyframes slideInRight {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        @keyframes slideOutRight {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(100%); opacity: 0; }
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="header">
+            <h1>화자 프로필 관리</h1>
+            <div style="display: flex; gap: 12px;">
+                <button class="btn" onclick="toggleTheme()" id="theme-btn"><span aria-hidden="true">🌙</span> 다크 모드</button>
+                <button class="btn btn-primary" onclick="openModal('addModal')">+ 새 화자 등록</button>
+            </div>
+        </div>
+
+        <div class="glass">
+            <div class="speaker-list" id="speaker-list">
+                <div class="empty-state">로딩 중...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add/Edit Modal -->
+    <div class="modal-overlay" id="addModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-hidden="true" inert>
+        <div class="modal-container">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modalTitle">새 화자 등록</h2>
+                <button class="close-btn" onclick="closeModal('addModal')">&times;</button>
+            </div>
+            <form id="speakerForm" onsubmit="handleFormSubmit(event)">
+                <div class="form-group">
+                    <label for="speakerName">화자 이름</label>
+                    <input type="text" id="speakerName" class="form-control" required placeholder="예: 민수">
+                </div>
+                <div class="form-group">
+                    <label for="speakerDesc">설명 (선택)</label>
+                    <input type="text" id="speakerDesc" class="form-control" placeholder="예: 개발팀 팀장">
+                </div>
+                <div class="form-group">
+                    <label>음성 샘플 (WAV, MP3, M4A)</label>
+                    <div class="file-upload-wrapper" id="dropZone">
+                        <div class="upload-icon">🎙️</div>
+                        <div style="color: var(--text-primary); font-weight: 500; margin-bottom: 4px;" id="fileNameDisplay" role="status" aria-live="polite">오디오 파일 선택 또는 드래그</div>
+                        <div style="color: var(--text-tertiary); font-size: var(--text-xs);">최소 10초 이상의 선명한 음성을 권장합니다.</div>
+                        <input type="file" id="speakerAudio" accept="audio/*" aria-label="화자 음성 샘플 파일 업로드" onchange="handleFileSelect(event)">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn" onclick="closeModal('addModal')">취소</button>
+                    <button type="submit" class="btn btn-primary" id="submitBtn">저장하기</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div class="modal-overlay" id="confirmModal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-hidden="true" inert>
+        <div class="modal-container" style="width: min(90%, 400px);">
+            <div class="modal-header" style="margin-bottom: 8px;">
+                <h2 class="modal-title" id="confirmTitle">확인</h2>
+                <button class="close-btn" onclick="closeConfirmModal()">&times;</button>
+            </div>
+            <div id="confirmMessage" style="color: var(--text-secondary); margin-bottom: 24px; font-size: var(--text-sm);">
+            </div>
+            <div class="modal-footer" style="margin-top: 0;">
+                <button type="button" class="btn" onclick="closeConfirmModal()">취소</button>
+                <button type="button" class="btn btn-danger" id="confirmActionBtn">삭제</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Script to handle UI logic -->
+    <script>
+        // Theme Management
+        function initTheme() {
+            const savedTheme = localStorage.getItem("theme");
+            if (savedTheme) {
+                document.documentElement.setAttribute("data-theme", savedTheme);
+            }
+            updateThemeBtn();
+        }
+
+        function toggleTheme() {
+            const currentTheme = document.documentElement.getAttribute("data-theme");
+            let newTheme = currentTheme === "light" ? "dark" : "light";
+            if (!currentTheme) {
+                newTheme = window.matchMedia("(prefers-color-scheme: light)").matches ? "dark" : "light";
+            }
+            document.documentElement.setAttribute("data-theme", newTheme);
+            localStorage.setItem("theme", newTheme);
+            updateThemeBtn();
+        }
+
+        function updateThemeBtn() {
+            const isLight = document.documentElement.getAttribute("data-theme") === "light" || 
+                            (!document.documentElement.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: light)").matches);
+            document.getElementById("theme-btn").innerHTML = isLight ? '<span aria-hidden="true">☀️</span> 라이트 모드' : '<span aria-hidden="true">🌙</span> 다크 모드';
+        }
+        initTheme();
+
+        // Toast Management
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = message;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.classList.add('hide');
+                toast.addEventListener('animationend', () => toast.remove());
+            }, 3000);
+        }
+
+        // Focus Trap 유틸리티
+        const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+        let _trapCleanup = null;
+
+        function trapFocus(modalEl) {
+            // 기존 트랩 정리
+            if (_trapCleanup) _trapCleanup();
+
+            function handleKeyDown(e) {
+                if (e.key === 'Escape') {
+                    // C06: Escape 키로 모달 닫기
+                    const openAddModal = document.getElementById('addModal');
+                    const openConfirm = document.getElementById('confirmModal');
+                    if (openConfirm.classList.contains('open')) {
+                        closeConfirmModal();
+                    } else if (openAddModal.classList.contains('open')) {
+                        closeModal('addModal');
+                    }
+                    return;
+                }
+                if (e.key !== 'Tab') return;
+
+                const focusable = Array.from(modalEl.querySelectorAll(FOCUSABLE_SELECTOR));
+                if (focusable.length === 0) return;
+
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+
+                if (e.shiftKey) {
+                    if (document.activeElement === first) {
+                        e.preventDefault();
+                        last.focus();
+                    }
+                } else {
+                    if (document.activeElement === last) {
+                        e.preventDefault();
+                        first.focus();
+                    }
+                }
+            }
+
+            document.addEventListener('keydown', handleKeyDown);
+            _trapCleanup = () => {
+                document.removeEventListener('keydown', handleKeyDown);
+                _trapCleanup = null;
+            };
+
+            // 첫 번째 포커스 가능 요소에 포커스
+            requestAnimationFrame(() => {
+                const focusable = modalEl.querySelectorAll(FOCUSABLE_SELECTOR);
+                if (focusable.length) focusable[0].focus();
+            });
+        }
+
+        // Modal Management
+        let isEditMode = false;
+        let currentEditName = '';
+        let _triggerElement = null;
+
+        function openModal(id, speaker = null) {
+            _triggerElement = document.activeElement;
+            const modal = document.getElementById(id);
+            modal.removeAttribute('aria-hidden');
+            modal.removeAttribute('inert');
+            modal.classList.add('open');
+
+            const form = document.getElementById('speakerForm');
+            const title = document.getElementById('modalTitle');
+            const fileDisplay = document.getElementById('fileNameDisplay');
+            const fileInput = document.getElementById('speakerAudio');
+
+            form.reset();
+            fileDisplay.textContent = "오디오 파일 선택 또는 드래그";
+
+            if (speaker) {
+                isEditMode = true;
+                currentEditName = speaker.name;
+                title.textContent = "화자 정보 편집";
+                document.getElementById('speakerName').value = speaker.name;
+                document.getElementById('speakerDesc').value = speaker.description || '';
+                document.getElementById('speakerName').readOnly = true;
+                fileInput.removeAttribute('required');
+            } else {
+                isEditMode = false;
+                currentEditName = '';
+                title.textContent = "새 화자 등록";
+                document.getElementById('speakerName').readOnly = false;
+                fileInput.setAttribute('required', 'required');
+            }
+
+            trapFocus(modal);
+        }
+
+        function closeModal(id) {
+            const modal = document.getElementById(id);
+            modal.classList.remove('open');
+            modal.setAttribute('aria-hidden', 'true');
+            modal.setAttribute('inert', '');
+            if (_trapCleanup) _trapCleanup();
+            if (_triggerElement) {
+                _triggerElement.focus();
+                _triggerElement = null;
+            }
+        }
+
+        // Confirm Modal Management
+        let confirmActionCallback = null;
+        let _confirmTriggerElement = null;
+
+        function openConfirmModal(title, message, callback) {
+            _confirmTriggerElement = document.activeElement;
+            const modal = document.getElementById('confirmModal');
+            document.getElementById('confirmTitle').textContent = title;
+            document.getElementById('confirmMessage').textContent = message;
+            confirmActionCallback = callback;
+            modal.removeAttribute('aria-hidden');
+            modal.removeAttribute('inert');
+            modal.classList.add('open');
+            trapFocus(modal);
+        }
+
+        function closeConfirmModal() {
+            const modal = document.getElementById('confirmModal');
+            modal.classList.remove('open');
+            modal.setAttribute('aria-hidden', 'true');
+            modal.setAttribute('inert', '');
+            confirmActionCallback = null;
+            if (_trapCleanup) _trapCleanup();
+            if (_confirmTriggerElement) {
+                _confirmTriggerElement.focus();
+                _confirmTriggerElement = null;
+            }
+        }
+
+        document.getElementById('confirmActionBtn').addEventListener('click', () => {
+            if (confirmActionCallback) confirmActionCallback();
+            closeConfirmModal();
+        });
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                if (!file.type.startsWith('audio/')) {
+                    showToast('오디오 파일만 업로드할 수 있습니다.', 'error');
+                    event.target.value = ''; // Reset
+                    document.getElementById('fileNameDisplay').textContent = "오디오 파일 선택 또는 드래그";
+                    return;
+                }
+                const sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+                document.getElementById('fileNameDisplay').textContent = `${file.name} (${sizeMB} MB)`;
+            }
+        }
+
+        // Mock data for prototype
+        let profiles = [
+            { name: "민수", description: "백엔드 개발자", enrolled_at: "2026-03-01T10:00:00", duration_seconds: 15.2 },
+            { name: "지영", description: "프로덕트 매니저", enrolled_at: "2026-03-02T14:30:00", duration_seconds: 22.1 }
+        ];
+
+        async function fetchProfiles() {
+            const listEl = document.getElementById('speaker-list');
+            listEl.innerHTML = `
+                <div class="empty-state">
+                    <div style="display: inline-block; width: 24px; height: 24px; border: 3px solid var(--border-subtle); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 12px;"></div>
+                    <div>로딩 중...</div>
+                </div>
+            `;
+            try {
+                const res = await fetch('/api/profiles');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.speakers) {
+                        profiles = Object.entries(data.speakers).map(([name, info]) => ({
+                            name,
+                            ...info
+                        }));
+                    }
+                } else {
+                    throw new Error('API 오류');
+                }
+            } catch (err) {
+                console.warn("API fetch failed, using mock data", err);
+                showToast('프로필 목록을 불러오지 못했습니다. (임시 데이터 사용)', 'error');
+            }
+            renderProfiles();
+        }
+
+        function renderProfiles() {
+            const listEl = document.getElementById('speaker-list');
+            if (profiles.length === 0) {
+                listEl.innerHTML = '<div class="empty-state">등록된 화자가 없습니다.</div>';
+                return;
+            }
+
+            listEl.innerHTML = profiles.map(p => `
+                <div class="speaker-item">
+                    <div class="speaker-info">
+                        <div class="speaker-name">${p.name}</div>
+                        ${p.description ? `<div class="speaker-desc">${p.description}</div>` : ''}
+                        <div class="speaker-meta">
+                            등록일: ${new Date(p.enrolled_at).toLocaleString()} 
+                            &middot; 음성 길이: ${p.duration_seconds ? p.duration_seconds.toFixed(1) + '초' : 'N/A'}
+                        </div>
+                    </div>
+                    <div class="speaker-actions">
+                        <button class="btn" onclick="editProfile('${p.name}')" aria-label="${p.name} 프로필 편집">편집</button>
+                        <button class="btn btn-danger" onclick="deleteProfile('${p.name}')" aria-label="${p.name} 프로필 삭제">삭제</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function editProfile(name) {
+            const p = profiles.find(x => x.name === name);
+            if (p) openModal('addModal', p);
+        }
+
+        async function deleteProfile(name) {
+            openConfirmModal('화자 삭제', `'${name}' 화자를 삭제하시겠습니까?`, async () => {
+                try {
+                    const res = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                    if (!res.ok) throw new Error();
+                    profiles = profiles.filter(p => p.name !== name);
+                    showToast('화자가 삭제되었습니다.', 'success');
+                } catch (err) {
+                    console.warn("Mocking API delete");
+                    profiles = profiles.filter(p => p.name !== name); // mock fallback
+                    showToast('화자가 삭제되었습니다.', 'success');
+                }
+                renderProfiles();
+            });
+        }
+
+        async function handleFormSubmit(e) {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            btn.disabled = true;
+            btn.textContent = '저장 중...';
+
+            const name = document.getElementById('speakerName').value;
+            const desc = document.getElementById('speakerDesc').value;
+            const file = document.getElementById('speakerAudio').files[0];
+
+            const formData = new FormData();
+            formData.append('name', name);
+            if (desc) formData.append('description', desc);
+            if (file) formData.append('audio', file);
+
+            try {
+                const method = isEditMode ? 'PUT' : 'POST';
+                const url = isEditMode ? `/api/profiles/${encodeURIComponent(name)}` : '/api/profiles';
+                
+                let success = false;
+                try {
+                    const res = await fetch(url, { method, body: formData });
+                    success = res.ok;
+                } catch(err) {
+                    console.warn("Mocking API form submit");
+                    success = true; // mock fallback
+                }
+
+                if (success) {
+                    if (isEditMode) {
+                        const p = profiles.find(x => x.name === name);
+                        if (p) {
+                            p.description = desc;
+                            if (file) p.enrolled_at = new Date().toISOString();
+                        }
+                    } else {
+                        profiles.push({
+                            name,
+                            description: desc,
+                            enrolled_at: new Date().toISOString(),
+                            duration_seconds: 15.0 // Mock duration
+                        });
+                    }
+                    closeModal('addModal');
+                    renderProfiles();
+                    showToast('성공적으로 저장되었습니다.', 'success');
+                } else {
+                    showToast('저장에 실패했습니다.', 'error');
+                }
+            } catch (err) {
+                showToast('오류가 발생했습니다.', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '저장하기';
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', fetchProfiles);
+
+        // Drag and drop setup
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('speakerAudio');
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileSelect({target: fileInput});
+            }
+        });
+    </script>
+</body>
+</html>
