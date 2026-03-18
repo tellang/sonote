@@ -85,6 +85,7 @@ def find_content_start(
     probe_seconds: int = 15,
     format_id: str = "91",
     verbose: bool = True,
+    cookies_path: str | Path | None = None,
 ) -> dict:
     """
     라이브 스트림에서 실제 강의 시작 지점을 탐색.
@@ -98,6 +99,7 @@ def find_content_start(
         probe_seconds: 각 프로브 길이 (초)
         format_id: yt-dlp 포맷 ID
         verbose: 진행 출력 여부
+        cookies_path: cookies.txt 경로 (None이면 자동 탐색)
 
     Returns:
         {
@@ -110,7 +112,7 @@ def find_content_start(
     _log = print if verbose else lambda *a, **kw: None
 
     _log("[탐색] 스트림 URL 추출 중...")
-    stream_url = get_stream_url(video_url, format_id)
+    stream_url = get_stream_url(video_url, format_id, cookies_path=cookies_path)
 
     # Phase 1: 지수 스캔
     checkpoints = [5, 15, 30, 60, 90, 120, 150, 180]
@@ -231,6 +233,7 @@ def scan_stream(
     step_minutes: int = 5,
     probe_seconds: int = 15,
     format_id: str = "91",
+    cookies_path: str | Path | None = None,
 ) -> dict:
     """
     전체 스트림 구간 맵핑 — 모든 BGM/음성 블록 식별.
@@ -246,6 +249,7 @@ def scan_stream(
         step_minutes: 프로브 간격 (분)
         probe_seconds: 각 프로브 길이 (초)
         format_id: yt-dlp 포맷 ID
+        cookies_path: cookies.txt 경로 (None이면 자동 탐색)
 
     Returns:
         {
@@ -256,7 +260,7 @@ def scan_stream(
         }
     """
     print("[스캔] 스트림 URL 추출 중...")
-    stream_url = get_stream_url(video_url, format_id)
+    stream_url = get_stream_url(video_url, format_id, cookies_path=cookies_path)
 
     checkpoints = list(range(step_minutes, max_back_minutes + 1, step_minutes))
     # 최근→과거 순서로 스캔 (과거가 큰 값)

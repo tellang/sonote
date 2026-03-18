@@ -7,32 +7,73 @@ import subprocess
 import shutil
 from pathlib import Path
 
+from .cookies import resolve_cookies_path
+
 # 블록 내부 분할 다운로드 설정
 SPLIT_THRESHOLD_MIN = 20  # 이보다 긴 블록만 분할
 SUB_CHUNK_MIN = 15        # 서브청크 크기 (분)
 BOUNDARY_MARGIN_MIN = 5   # 마지막 청크 경계 여유 (분)
 
 
-def get_stream_url(video_url: str, format_id: str = "91") -> str:
-    """yt-dlp로 HLS 스트림 URL 추출"""
-    result = subprocess.run(
+def _resolve_cookie_file(cookies_path: str | Path | None) -> Path | None:
+    if cookies_path is None:
+        return resolve_cookies_path()
+    return resolve_cookies_path(cookies_path, strict=True)
+
+
+def get_stream_url(
+    video_url: str,
+    format_id: str = "91",
+    cookies_path: str | Path | None = None,
+) -> str:
+    """yt-dlp로 HLS 스트림 URL 추출 (쿠키 자동 감지 + 브라우저 fallback)."""
+    cookie_file = _resolve_cookie_file(cookies_path)
+
+    strategies: list[list[str]] = []
+    if cookie_file:
+        strategies.append([
+            "yt-dlp", "--js-runtimes", "node",
+            "--cookies", str(cookie_file),
+            "-f", format_id, "-g", video_url,
+        ])
+    else:
+        strategies.append([
+            "yt-dlp", "--js-runtimes", "node",
+            "-f", format_id, "-g", video_url,
+        ])
+
+    strategies.extend([
         ["yt-dlp", "--js-runtimes", "node", "--cookies-from-browser", "chrome", "-f", format_id, "-g", video_url],
-        capture_output=True,
-        text=True,
-    )
-    for line in result.stdout.strip().split("\n"):
-        if line.startswith("http"):
-            return line.strip()
-    raise RuntimeError(f"스트림 URL 추출 실패: {result.stderr[:300]}")
+        ["yt-dlp", "--js-runtimes", "node", "--cookies-from-browser", "edge", "-f", format_id, "-g", video_url],
+    ])
+
+    last_err = ""
+    for cmd in strategies:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        for line in result.stdout.strip().split("\n"):
+            if line.startswith("http"):
+                return line.strip()
+        last_err = result.stderr[:300]
+    raise RuntimeError(f"스트림 URL 추출 실패: {last_err}")
 
 
-def list_formats(video_url: str) -> str:
-    """사용 가능한 포맷 목록 조회"""
-    result = subprocess.run(
-        ["yt-dlp", "--js-runtimes", "node", "--cookies-from-browser", "chrome", "--list-formats", video_url],
-        capture_output=True,
-        text=True,
-    )
+def list_formats(video_url: str, cookies_path: str | Path | None = None) -> str:
+    """사용 가능한 포맷 목록 조회 (쿠키 자동 감지 + 브라우저 fallback)."""
+    cookie_file = _resolve_cookie_file(cookies_path)
+
+    cookie_args_list: list[list[str]] = []
+    if cookie_file:
+        cookie_args_list.append(["--cookies", str(cookie_file)])
+    else:
+        cookie_args_list.append([])
+    cookie_args_list.extend([["--cookies-from-browser", "chrome"], ["--cookies-from-browser", "edge"]])
+
+    result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+    for cookie_args in cookie_args_list:
+        cmd = ["yt-dlp", "--js-runtimes", "node", *cookie_args, "--list-formats", video_url]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
     return result.stdout
 
 
@@ -130,6 +171,7 @@ def download_live_audio(
     duration_minutes: int = 50,
     format_id: str = "91",
     sample_rate: int = 16000,
+    cookies_path: str | Path | None = None,
 ) -> Path:
     """
     YouTube 라이브 스트림에서 오디오 다운로드
@@ -150,7 +192,7 @@ def download_live_audio(
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg가 설치되어 있지 않습니다")
 
-    stream_url = get_stream_url(video_url, format_id)
+    stream_url = get_stream_url(video_url, format_id, cookies_path=cookies_path)
 
     proc = _start_ffmpeg(
         ffmpeg_path, stream_url, minutes_back, duration_minutes, output_path, sample_rate,
@@ -171,6 +213,7 @@ def download_speech_blocks(
     sample_rate: int = 16000,
     chunk_minutes: int = SUB_CHUNK_MIN,
     split_threshold: int = SPLIT_THRESHOLD_MIN,
+    cookies_path: str | Path | None = None,
 ) -> list[Path]:
     """
     스캔 결과의 음성 블록들을 병렬로 다운로드.
@@ -198,7 +241,7 @@ def download_speech_blocks(
         raise RuntimeError("ffmpeg가 설치되어 있지 않습니다")
 
     print("[다운로드] 스트림 URL 추출 중...")
-    stream_url = get_stream_url(video_url, format_id)
+    stream_url = get_stream_url(video_url, format_id, cookies_path=cookies_path)
 
     # 음성 블록만 필터 + 시간순 정렬 (과거→최근)
     speech_blocks = [b for b in blocks if b["type"] == "speech"]

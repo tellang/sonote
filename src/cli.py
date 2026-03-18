@@ -19,6 +19,11 @@ import numpy as np
 
 from src.db import save_profile, get_profile, list_profiles, update_captured, delete_profile
 from src.domain_keywords import DEFAULT_DOMAIN_HINT
+from .cookies import (
+    check_cookies_file,
+    export_chrome_cookies_to_netscape,
+    resolve_cookies_path,
+)
 from src.paths import (
     transcripts_dir, audio_dir,
     speakers_json_path,
@@ -50,6 +55,40 @@ _CODE_REASON_MAP: dict[str, str] = {
     "NOT_FOUND": "notFound",
     "PREFLIGHT_FAIL": "preflightFail",
 }
+
+_BETA_ENV_KEY = "SONOTE_BETA"
+_BETA_MODEL_ID = "tellang/whisper-large-v3-turbo-ko"
+
+
+def _is_beta_mode_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "beta", False) or os.getenv(_BETA_ENV_KEY) == "1")
+
+
+def _has_explicit_model_arg(argv: list[str]) -> bool:
+    for token in argv:
+        if token in ("-m", "--model"):
+            return True
+        if token.startswith("--model="):
+            return True
+    return False
+
+
+def _apply_beta_mode(args: argparse.Namespace, argv: list[str]) -> bool:
+    beta_mode = _is_beta_mode_enabled(args)
+    if beta_mode:
+        os.environ[_BETA_ENV_KEY] = "1"
+
+    try:
+        from .postprocess import set_beta_mode
+
+        set_beta_mode(beta_mode)
+    except Exception:
+        pass
+
+    if beta_mode and hasattr(args, "model") and not _has_explicit_model_arg(argv):
+        setattr(args, "model", _BETA_MODEL_ID)
+
+    return beta_mode
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +310,10 @@ def json_output(
 
 # --- 서브커맨드별 필수 외부 의존성 (schema 출력에 포함) ---
 _COMMAND_DEPENDENCIES: dict[str, list[dict[str, str]]] = {
+    "desktop": [
+        {"name": "pywebview", "required": True, "description": "네이티브 데스크톱 웹뷰"},
+        {"name": "pystray", "required": True, "description": "시스템 트레이 통합"},
+    ],
     "transcribe": [
         {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
     ],
@@ -316,6 +359,10 @@ _COMMAND_DEPENDENCIES: dict[str, list[dict[str, str]]] = {
     "enroll": [
         {"name": "HF_TOKEN", "required": True, "description": "Hugging Face 토큰 (화자 임베딩 추출)"},
         {"name": "GPU/CUDA", "required": False, "description": "CUDA GPU 가속 (CPU 폴백 가능)"},
+    ],
+    "cookies": [
+        {"name": "Windows", "required": True, "description": "Chrome DPAPI 쿠키 추출은 Windows 전용"},
+        {"name": "Chrome", "required": True, "description": "기본 프로필 쿠키 DB 접근"},
     ],
 }
 
@@ -413,7 +460,7 @@ def main():
   전사:  transcribe, live, download
   분석:  detect, map, auto
   회의:  meeting, approve
-  관리:  profile, schema
+  관리:  profile, schema, autostart
 
 사용 예시:
   # 로컬 오디오 파일 변환
@@ -432,6 +479,10 @@ def main():
     parser.add_argument(
         "--ndjson", action="store_true", dest="ndjson_mode",
         help="줄 단위 JSON 스트리밍 출력 (transcribe/meeting용)",
+    )
+    parser.add_argument(
+        "--beta", action="store_true",
+        help="베타 모드 활성화 (또는 SONOTE_BETA=1)",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -467,6 +518,11 @@ def main():
     p_live.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
     p_live.add_argument("-l", "--language", default="ko", help="언어 코드")
     p_live.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
+    p_live.add_argument(
+        "--cookies",
+        default=None,
+        help="cookies.txt 경로 (미지정 시 자동 탐색: SONOTE_COOKIES → ./cookies.txt → output/data/cookies.txt)",
+    )
     p_live.add_argument("--fmt", choices=["txt", "srt"], default="txt", help="출력 형식")
     p_live.add_argument(
         "--resume", metavar="FILE",
@@ -522,6 +578,11 @@ def main():
     p_smart.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
     p_smart.add_argument("-l", "--language", default="ko", help="언어 코드")
     p_smart.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
+    p_smart.add_argument(
+        "--cookies",
+        default=None,
+        help="cookies.txt 경로 (미지정 시 자동 탐색: SONOTE_COOKIES → ./cookies.txt → output/data/cookies.txt)",
+    )
     p_smart.add_argument("--fmt", choices=["txt", "srt"], default="txt", help="출력 형식")
     p_smart.add_argument(
         "--max-back", type=int, default=180,
@@ -539,6 +600,10 @@ def main():
         "--force-scan", action="store_true",
         help="DB 캐시 무시, 강제 재스캔",
     )
+    p_smart.add_argument(
+        "--watch", type=int, default=0, metavar="MINUTES",
+        help="주기적 증분 캡처 간격(분). 0이면 1회만 실행 (기본: 0)",
+    )
 
     # profile: 비디오 프로필 DB 관리
     sub_profile = subparsers.add_parser("profile", help="비디오 프로필 DB 관리")
@@ -548,6 +613,23 @@ def main():
     show_parser.add_argument("video_id", help="YouTube video ID")
     del_parser = profile_sub.add_parser("delete", help="프로필 삭제")
     del_parser.add_argument("video_id", help="YouTube video ID")
+
+    # cookies: Chrome 쿠키 export/check/path
+    p_cookies = subparsers.add_parser("cookies", help="Chrome 쿠키 관리")
+    cookies_sub = p_cookies.add_subparsers(dest="cookies_cmd", required=True)
+
+    p_cookies_export = cookies_sub.add_parser(
+        "export",
+        help="Chrome 쿠키를 Netscape cookies.txt로 추출 (output/data/cookies.txt)",
+    )
+    p_cookies_export.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="저장 경로 (기본: output/data/cookies.txt)",
+    )
+    cookies_sub.add_parser("check", help="현재 cookies.txt 유효성(만료) 점검")
+    cookies_sub.add_parser("path", help="현재 사용 중인 cookies.txt 경로 출력")
 
     # download: 오디오만 다운로드
     p_dl = subparsers.add_parser("download", help="YouTube 라이브 오디오만 다운로드")
@@ -650,6 +732,26 @@ def main():
         "--dry-run", action="store_true",
         help="실제 전사 없이 설정값만 출력 (--json과 함께 사용 권장)",
     )
+    p_meeting.add_argument(
+        "--auto-mute", action="store_true",
+        help="녹음 시작 시 다른 미디어 앱 자동 음소거 (종료 시 복원)",
+    )
+
+    p_desktop = subparsers.add_parser(
+        "desktop",
+        help="pywebview 기반 네이티브 데스크톱 앱 실행",
+    )
+    p_desktop.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="내장 FastAPI 서버 호스트 (기본: 127.0.0.1)",
+    )
+    p_desktop.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="내장 FastAPI 서버 포트 (기본: 0=자동 선택)",
+    )
 
     # status: 환경 진단 독립 실행
     subparsers.add_parser(
@@ -657,9 +759,62 @@ def main():
         help="GPU/모델/디스크/외부 도구 상태 진단 (preflight_check 독립 실행)",
     )
 
+    # autostart: Windows 자동 시작 등록/해제/상태 확인
+    p_autostart = subparsers.add_parser(
+        "autostart",
+        help="Windows 자동 시작 등록/해제/상태 확인",
+    )
+    autostart_group = p_autostart.add_mutually_exclusive_group(required=True)
+    autostart_group.add_argument(
+        "--enable",
+        action="store_true",
+        help="현재 실행 경로를 Windows 자동 시작에 등록",
+    )
+    autostart_group.add_argument(
+        "--disable",
+        action="store_true",
+        help="Windows 자동 시작 등록 해제",
+    )
+    autostart_group.add_argument(
+        "--status",
+        action="store_true",
+        help="현재 실행 경로의 자동 시작 등록 상태 확인",
+    )
+
+    # doctor: 종합 환경 진단 (설치 안내 포함)
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="종합 환경 진단 — 의존성 점검 + 설치 안내 + 폴백 체인 표시",
+    )
+    p_doctor.add_argument(
+        "--json", action="store_true", dest="doctor_json",
+        help="JSON 형식으로 출력 (AI 에이전트용)",
+    )
+
     p_approve = subparsers.add_parser("approve", help="회의 후 후보 프로필 적용 (구: approve-profiles)")
     p_approve.add_argument("review", help="meeting *.profile-review.json 경로")
     p_approve.add_argument("--profiles", help="적용 대상 프로필 JSON (기본: review 파일의 base_profiles_path)")
+
+    # update: GitHub Releases 기반 자동 업데이트
+    p_update = subparsers.add_parser(
+        "update",
+        help="GitHub Releases에서 최신 버전 확인 및 설치",
+    )
+    update_action = p_update.add_mutually_exclusive_group(required=True)
+    update_action.add_argument(
+        "--check",
+        action="store_true",
+        help="업데이트 가능 여부만 확인 (다운로드 없음)",
+    )
+    update_action.add_argument(
+        "--install",
+        action="store_true",
+        help="최신 버전 다운로드 후 설치 (사용자 확인 필요)",
+    )
+    p_update.add_argument(
+        "--json", action="store_true", dest="update_json",
+        help="JSON 형식으로 출력",
+    )
 
     # --- deprecated aliases (하위 호환) ---
     # probe → detect
@@ -679,11 +834,17 @@ def main():
     _p_smart_old.add_argument("-m", "--model", default="large-v3-turbo", help="Whisper 모델")
     _p_smart_old.add_argument("-l", "--language", default="ko", help="언어 코드")
     _p_smart_old.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
+    _p_smart_old.add_argument(
+        "--cookies",
+        default=None,
+        help="cookies.txt 경로 (미지정 시 자동 탐색)",
+    )
     _p_smart_old.add_argument("--fmt", choices=["txt", "srt"], default="txt", help="출력 형식")
     _p_smart_old.add_argument("--max-back", type=int, default=180, help="최대 탐색 범위(분)")
     _p_smart_old.add_argument("--step", type=int, default=5, help="스캔 프로브 간격(분)")
     _p_smart_old.add_argument("--resume", metavar="FILE", help="기존 스크립트와 병합")
     _p_smart_old.add_argument("--force-scan", action="store_true", help="DB 캐시 무시")
+    _p_smart_old.add_argument("--watch", type=int, default=0, metavar="MINUTES", help="주기적 증분 캡처 간격(분)")
     # approve-profiles → approve
     _p_approve_old = subparsers.add_parser("approve-profiles", help="[deprecated] approve를 사용하세요")
     _p_approve_old.add_argument("review", help="meeting *.profile-review.json 경로")
@@ -697,6 +858,8 @@ def main():
     }
 
     args = parser.parse_args()
+    beta_mode = _apply_beta_mode(args, sys.argv[1:])
+    setattr(args, "_beta_mode", beta_mode)
 
     # deprecated alias 감지 시 stderr 경고
     if args.command in _ALIASES:
@@ -717,6 +880,18 @@ def main():
     # status 커맨드: 환경 진단 독립 실행
     if args.command == "status":
         _cmd_status(args)
+        return
+
+    # autostart 커맨드: Windows 자동 시작 제어
+    if args.command == "autostart":
+        _cmd_autostart(args)
+        return
+
+    # doctor 커맨드: 종합 환경 진단
+    if args.command == "doctor":
+        from .doctor import run_diagnosis, print_diagnosis
+        result = run_diagnosis()
+        print_diagnosis(result, use_json=getattr(args, "doctor_json", False))
         return
 
     # --dry-run 처리 (transcribe, meeting) — capabilities/diagnostics 포함
@@ -771,6 +946,7 @@ def main():
 
     # 커맨드 디스패치 (--json 모드 에러 핸들링 포함)
     _dispatch = {
+        "desktop": _cmd_desktop,
         "transcribe": _cmd_transcribe,
         "live": _cmd_live,
         "download": _cmd_download,
@@ -778,6 +954,8 @@ def main():
         "map": _cmd_scan,
         "auto": _cmd_smart,
         "profile": _cmd_profile,
+        "cookies": _cmd_cookies,
+        "update": _cmd_update,
         "enroll": _cmd_enroll,
         "approve": _cmd_approve_profiles,
         "meeting": _cmd_meeting,
@@ -855,6 +1033,66 @@ def _cmd_status(args: argparse.Namespace) -> None:
         print(json_output("success", "status", data=status_data))
     else:
         print(_json.dumps(status_data, ensure_ascii=False, indent=2))
+
+
+def _cmd_autostart(args: argparse.Namespace) -> None:
+    """Windows 자동 시작 등록/해제/상태 확인을 수행한다."""
+    from .autostart import (
+        AutostartError,
+        get_exe_path,
+        is_registered,
+        register,
+        unregister,
+    )
+
+    is_json = getattr(args, "json_mode", False)
+
+    try:
+        if args.enable:
+            register()
+            enabled = True
+            action = "enable"
+            message = "Windows 자동 시작을 등록했습니다."
+        elif args.disable:
+            unregister()
+            enabled = False
+            action = "disable"
+            message = "Windows 자동 시작을 해제했습니다."
+        else:
+            enabled = is_registered()
+            action = "status"
+            message = "Windows 자동 시작이 등록되어 있습니다." if enabled else "Windows 자동 시작이 비활성화되어 있습니다."
+    except AutostartError as exc:
+        if is_json:
+            print(json_output("error", "autostart", error=str(exc), code="ERROR"))
+        else:
+            print(f"[자동 시작] 오류: {exc}", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
+
+    data: dict[str, Any] = {
+        "action": action,
+        "enabled": enabled,
+        "exe_path": get_exe_path(),
+    }
+
+    if is_json:
+        print(json_output("success", "autostart", data=data))
+        return
+
+    print(message)
+    print(f"등록 상태: {'사용' if enabled else '사용 안 함'}")
+    print(f"실행 경로: {data['exe_path']}")
+
+
+def _cmd_desktop(args: argparse.Namespace) -> None:
+    """pywebview 기반 데스크톱 모드를 실행한다."""
+    from .desktop import run_desktop
+
+    run_desktop(
+        host=args.host,
+        port=args.port,
+        beta_mode=getattr(args, "_beta_mode", False),
+    )
 
 
 def _cmd_dry_run(args: argparse.Namespace) -> None:
@@ -1008,118 +1246,155 @@ def _cmd_scan(args: argparse.Namespace) -> None:
         print("[DB] video_id 추출 실패: 스캔 결과 저장 생략", file=sys.stderr)
 
 
+def _watch_sleep(minutes: int) -> None:
+    """watch 모드 대기. KeyboardInterrupt 시 프로그램 종료."""
+    print(f"\n[watch] {minutes}분 후 재스캔... (Ctrl+C로 종료)", file=sys.stderr)
+    try:
+        time.sleep(minutes * 60)
+    except KeyboardInterrupt:
+        print("\n[watch] 사용자 중단으로 종료", file=sys.stderr)
+        raise SystemExit(0)
+
+
 def _cmd_smart(args: argparse.Namespace) -> None:
-    """스캔 → 병렬 다운로드 → 변환 → 병합 올인원."""
+    """스캔 → 병렬 다운로드 → 변환 → 병합 올인원. --watch 시 주기적 증분 캡처."""
     from .probe import scan_stream
     from .download import download_speech_blocks
     from .transcribe import save_transcript, transcribe_chunks
 
     output_dir = Path(args.output) if args.output else transcripts_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
-    # 오디오는 audio/YYYY-MM-DD/ 에 저장
     audio_output = audio_dir()
 
     device = "cpu" if args.cpu else None
     compute_type = "int8" if args.cpu else None
 
-    # video_id가 있으면 기존 프로필/스캔 결과를 조회
     video_id = extract_video_id(args.url)
-    profile = get_profile(video_id) if video_id else None
+    watch_interval = getattr(args, "watch", 0)
+    iteration = 0
 
-    # Phase 1: 스캔
-    print("=" * 60, file=sys.stderr)
-    print("[Phase 1/3] 스트림 구간 스캔", file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
-    if profile and profile.get("scan_result") and not args.force_scan:
-        print(f"[DB] 기존 스캔 결과 사용 ({video_id})", file=sys.stderr)
-        scan_result = profile["scan_result"]
-    else:
-        scan_result = scan_stream(
-            args.url, max_back_minutes=args.max_back, step_minutes=args.step,
-        )
-        if video_id:
-            save_profile(
-                video_id,
+    while True:
+        iteration += 1
+        force_scan = args.force_scan or (watch_interval > 0 and iteration > 1)
+
+        if watch_interval and iteration > 1:
+            print(f"\n{'=' * 60}", file=sys.stderr)
+            print(f"[watch #{iteration}] 증분 캡처 시작", file=sys.stderr)
+            print(f"{'=' * 60}", file=sys.stderr)
+
+        profile = get_profile(video_id) if video_id else None
+
+        # Phase 1: 스캔
+        print("=" * 60, file=sys.stderr)
+        print("[Phase 1/3] 스트림 구간 스캔", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        if profile and profile.get("scan_result") and not force_scan:
+            print(f"[DB] 기존 스캔 결과 사용 ({video_id})", file=sys.stderr)
+            scan_result = profile["scan_result"]
+        else:
+            scan_result = scan_stream(
                 args.url,
-                scan_result=scan_result,
-                total_speech_min=scan_result.get("total_speech_min"),
+                max_back_minutes=args.max_back,
+                step_minutes=args.step,
+                cookies_path=args.cookies,
+            )
+            if video_id:
+                save_profile(
+                    video_id,
+                    args.url,
+                    scan_result=scan_result,
+                    total_speech_min=scan_result.get("total_speech_min"),
+                )
+
+        speech_ranges = scan_result.get("speech_ranges") or []
+        if not speech_ranges:
+            print("[중단] 음성 구간을 찾지 못했습니다", file=sys.stderr)
+            if watch_interval > 0:
+                _watch_sleep(watch_interval)
+                continue
+            return
+
+        # Phase 2: 음성 블록만 병렬 다운로드
+        print(file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print("[Phase 2/3] 음성 블록 병렬 다운로드", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        blocks = scan_result.get("blocks") or []
+        audio_files = download_speech_blocks(
+            args.url,
+            blocks,
+            audio_output,
+            cookies_path=args.cookies,
+        )
+
+        if not audio_files:
+            print("[중단] 다운로드된 파일 없음", file=sys.stderr)
+            if watch_interval > 0:
+                _watch_sleep(watch_interval)
+                continue
+            return
+
+        # Phase 3: 각 블록 변환 + 병합
+        print(file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+        print(f"[Phase 3/3] 변환 ({len(audio_files)}개 블록)", file=sys.stderr)
+        print("=" * 60, file=sys.stderr)
+
+        all_segments = []
+        cumulative_offset = 0.0
+
+        for i, audio_path in enumerate(audio_files):
+            print(f"\n--- 블록 {i}/{len(audio_files) - 1}: {audio_path.name} ---", file=sys.stderr)
+            segments = transcribe_chunks(
+                audio_path,
+                chunk_minutes=10,
+                model_id=args.model,
+                language=args.language,
+                device=device,
+                compute_type=compute_type,
             )
 
-    speech_ranges = scan_result.get("speech_ranges") or []
-    if not speech_ranges:
-        print("[중단] 음성 구간을 찾지 못했습니다", file=sys.stderr)
-        return
+            for seg in segments:
+                seg["start"] += cumulative_offset
+                seg["end"] += cumulative_offset
+            all_segments.extend(segments)
 
-    # Phase 2: 음성 블록만 병렬 다운로드
-    print(file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
-    print("[Phase 2/3] 음성 블록 병렬 다운로드", file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
-    blocks = scan_result.get("blocks") or []
-    audio_files = download_speech_blocks(
-        args.url, blocks, audio_output,
-    )
+            if segments:
+                cumulative_offset = segments[-1]["end"]
 
-    if not audio_files:
-        print("[중단] 다운로드된 파일 없음", file=sys.stderr)
-        return
+        # 기존 스크립트와 병합
+        if args.resume:
+            from .merge import merge_transcripts, load_transcript
+            existing = load_transcript(args.resume)
+            if existing:
+                all_segments = merge_transcripts(existing, all_segments)
 
-    # Phase 3: 각 블록 변환 + 병합
-    print(file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
-    print(f"[Phase 3/3] 변환 ({len(audio_files)}개 블록)", file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
+        # 저장
+        transcript_path = output_dir / f"transcript.{args.fmt}"
+        save_transcript(all_segments, transcript_path, fmt=args.fmt)
 
-    all_segments = []
-    cumulative_offset = 0.0
+        if args.resume:
+            save_transcript(all_segments, args.resume, fmt=args.fmt)
 
-    for i, audio_path in enumerate(audio_files):
-        print(f"\n--- 블록 {i}/{len(audio_files) - 1}: {audio_path.name} ---", file=sys.stderr)
-        segments = transcribe_chunks(
-            audio_path,
-            chunk_minutes=10,
-            model_id=args.model,
-            language=args.language,
-            device=device,
-            compute_type=compute_type,
-        )
+        print(f"\n{'=' * 60}", file=sys.stderr)
+        print(f"[완료] {len(all_segments)}개 세그먼트 → {transcript_path}", file=sys.stderr)
 
-        # 타임스탬프 오프셋 적용 (이전 블록 누적 길이)
-        for seg in segments:
-            seg["start"] += cumulative_offset
-            seg["end"] += cumulative_offset
-        all_segments.extend(segments)
+        total_mb = sum(f.stat().st_size for f in audio_files) / 1024 / 1024
+        print(f"[다운로드] 총 {total_mb:.0f}MB ({len(audio_files)}개 블록)", file=sys.stderr)
+        print(f"[정리] 오디오 파일은 {audio_output}에 보존됨", file=sys.stderr)
 
-        # 이 블록의 길이를 다음 블록 오프셋에 반영
-        if segments:
-            cumulative_offset = segments[-1]["end"]
+        if video_id:
+            captured_files = [str(path) for path in audio_files]
+            update_captured(video_id, speech_ranges, captured_files)
+            print(f"[DB] 캡처 정보 갱신 완료 ({video_id})", file=sys.stderr)
 
-    # 기존 스크립트와 병합
-    if args.resume:
-        from .merge import merge_transcripts, load_transcript
-        existing = load_transcript(args.resume)
-        if existing:
-            all_segments = merge_transcripts(existing, all_segments)
-
-    # 저장
-    transcript_path = output_dir / f"transcript.{args.fmt}"
-    save_transcript(all_segments, transcript_path, fmt=args.fmt)
-
-    if args.resume:
-        save_transcript(all_segments, args.resume, fmt=args.fmt)
-
-    print(f"\n{'=' * 60}", file=sys.stderr)
-    print(f"[완료] {len(all_segments)}개 세그먼트 → {transcript_path}", file=sys.stderr)
-
-    # 오디오 파일 크기 합계
-    total_mb = sum(f.stat().st_size for f in audio_files) / 1024 / 1024
-    print(f"[다운로드] 총 {total_mb:.0f}MB ({len(audio_files)}개 블록)", file=sys.stderr)
-    print(f"[정리] 오디오 파일은 {audio_output}에 보존됨", file=sys.stderr)
-
-    if video_id:
-        captured_files = [str(path) for path in audio_files]
-        update_captured(video_id, speech_ranges, captured_files)
-        print(f"[DB] 캡처 정보 갱신 완료 ({video_id})", file=sys.stderr)
+        # watch 모드: 다음 반복을 위해 resume 설정 후 대기
+        if watch_interval > 0:
+            if not args.resume:
+                args.resume = str(transcript_path)
+            _watch_sleep(watch_interval)
+        else:
+            break
 
 
 def _cmd_profile(args: argparse.Namespace) -> None:
@@ -1152,6 +1427,81 @@ def _cmd_profile(args: argparse.Namespace) -> None:
             print(f"프로필 없음: {args.video_id}")
 
 
+def _cmd_cookies(args: argparse.Namespace) -> None:
+    """Chrome cookies.txt export/check/path."""
+    is_json = getattr(args, "json_mode", False)
+
+    if args.cookies_cmd == "export":
+        result = export_chrome_cookies_to_netscape(output_path=args.output)
+        if is_json:
+            print(json_output("success", "cookies", data={
+                "action": "export",
+                **result,
+            }))
+            return
+
+        print(f"[cookies] 저장: {result['output_path']}")
+        print(
+            "[cookies] 내보냄 "
+            f"{result['exported_count']}/{result['total_count']} "
+            f"(v20 스킵: {result['skipped_v20']}, 오류 스킵: {result['skipped_error']})"
+        )
+        if result["skipped_v20"] > 0:
+            print(
+                "[안내] v20 App-Bound 쿠키는 외부 복호화가 불가합니다. "
+                "Chrome 확장으로 export한 cookies.txt 사용이 필요합니다."
+            )
+        return
+
+    if args.cookies_cmd == "check":
+        result = check_cookies_file()
+        if not result["exists"]:
+            message = "사용 가능한 cookies.txt를 찾지 못했습니다."
+            if is_json:
+                print(json_output("error", "cookies", error=message, code="NOT_FOUND"))
+            else:
+                print(f"[cookies] {message}")
+            return
+
+        status = "valid" if result["valid"] > 0 else "expired"
+        if is_json:
+            print(json_output("success", "cookies", data={
+                "action": "check",
+                "status": status,
+                **result,
+            }))
+            return
+
+        print(f"[cookies] 파일: {result['path']}")
+        print(
+            f"[cookies] 전체 {result['total']} / 유효 {result['valid']} / "
+            f"만료 {result['expired']} / 세션 {result['session']} / 손상 {result['malformed']}"
+        )
+        if status == "expired":
+            print("[안내] 유효한 쿠키가 없어 재-export가 필요합니다.")
+        return
+
+    if args.cookies_cmd == "path":
+        path = resolve_cookies_path()
+        if is_json:
+            if path:
+                print(json_output("success", "cookies", data={
+                    "action": "path",
+                    "path": str(path),
+                }))
+            else:
+                print(json_output("error", "cookies", error="사용 가능한 cookies.txt 없음", code="NOT_FOUND"))
+            return
+
+        if path:
+            print(path)
+        else:
+            print("사용 가능한 cookies.txt 없음")
+        return
+
+    raise ValueError(f"알 수 없는 cookies 서브커맨드: {args.cookies_cmd}")
+
+
 def _cmd_live(args):
     """YouTube 라이브 녹음 + 변환."""
     from .transcribe import save_transcript, transcribe_audio
@@ -1166,7 +1516,7 @@ def _cmd_live(args):
     if args.auto_start and args.back == 0:
         from .probe import find_content_start
         print("[자동 탐색] BGM 구간 건너뛰기...", file=sys.stderr)
-        result = find_content_start(args.url)
+        result = find_content_start(args.url, cookies_path=args.cookies)
         if result["status"] in ("found", "all_speech"):
             args.back = result["content_back"]
             print(f"[자동 탐색] --back {args.back} 으로 설정", file=sys.stderr)
@@ -1186,6 +1536,7 @@ def _cmd_live(args):
             device=device,
             compute_type=compute_type,
             fmt=args.fmt,
+            cookies_path=args.cookies,
         )
         return
 
@@ -1200,6 +1551,7 @@ def _cmd_live(args):
         audio_path,
         minutes_back=args.back,
         duration_minutes=args.duration,
+        cookies_path=args.cookies,
     )
 
     print(file=sys.stderr)
@@ -1648,7 +2000,10 @@ def _cmd_meeting(args):
     set_startup_status("booting", "로컬 UI 시작 중...")
     print(f"[서버] http://localhost:{args.port} 시작 중...", file=sys.stderr)
     server_thread = threading.Thread(
-        target=run_server, args=("127.0.0.1", args.port), daemon=True,
+        target=run_server,
+        args=("127.0.0.1", args.port),
+        kwargs={"beta_mode": getattr(args, "_beta_mode", False)},
+        daemon=True,
     )
     server_thread.start()
     _wait_for_server_ready(args.port, timeout_seconds=1.5)
@@ -1741,6 +2096,19 @@ def _cmd_meeting(args):
         )
         tray.start()
         print("[트레이] 시스템 트레이 아이콘 활성화", file=sys.stderr)
+
+    # 미디어 자동 음소거 (--auto-mute 또는 config)
+    _media_muted = False
+    if getattr(args, "auto_mute", False):
+        try:
+            from .media_control import is_available as _media_ok, mute_media_apps
+            if _media_ok():
+                muted = mute_media_apps(mute=True)
+                if muted:
+                    _media_muted = True
+                    print(f"[미디어] 음소거 적용: {', '.join(muted.keys())}", file=sys.stderr)
+        except Exception as e:
+            print(f"[미디어] 음소거 실패 (무시): {e}", file=sys.stderr)
 
     def _build_dynamic_domain_hint() -> str:
         """기본 도메인 힌트 + 웹 UI에서 추가한 동적 키워드 결합."""
@@ -2281,9 +2649,194 @@ def _cmd_meeting(args):
     print(f"[저장] {writer.output_path}", file=sys.stderr)
     print(f"[완료] {segment_count}개 세그먼트 | {duration_str} | 화자 {speaker_count}명", file=sys.stderr)
 
+    # 미디어 상태 복원
+    if _media_muted:
+        try:
+            from .media_control import restore_media_state
+            restore_media_state()
+            print("[미디어] 음소거 해제 — 이전 상태 복원", file=sys.stderr)
+        except Exception as e:
+            print(f"[미디어] 복원 실패: {e}", file=sys.stderr)
+
+    # Discord Webhook 회의 요약 전송
+    try:
+        from .discord_notify import is_configured, send_meeting_summary
+        if is_configured():
+            from .discord_notify import _get_webhook_url
+            _wh_url = _get_webhook_url()
+            if _wh_url:
+                _summary = f"{segment_count}개 세그먼트 | {duration_str} | 화자 {speaker_count}명"
+                _session_id = writer.output_path.parent.name if hasattr(writer, "output_path") else "unknown"
+                send_meeting_summary(_wh_url, _summary, speaker_count, duration_str, _session_id)
+                print("[디스코드] 회의 요약 전송 완료", file=sys.stderr)
+    except Exception as e:
+        print(f"[디스코드] 전송 실패 (무시): {e}", file=sys.stderr)
+
     # 완료 후 출력 폴더 열기 (Windows)
     if sys.platform == "win32":
         os.startfile(str(writer.output_path.parent))
+
+
+def _cmd_update(args: argparse.Namespace) -> None:
+    """GitHub Releases 기반 업데이트 확인 및 설치."""
+    from .updater import (
+        UpdateError,
+        check_for_update,
+        download_update,
+        get_current_version,
+        verify_checksum,
+    )
+
+    use_json = getattr(args, "update_json", False)
+    current_version = get_current_version()
+
+    # --check: 업데이트 가능 여부만 확인
+    if args.check:
+        try:
+            info = check_for_update()
+        except UpdateError as exc:
+            if use_json:
+                print(json_output("error", "update", error=str(exc), code="ERROR"))
+            else:
+                print(f"[업데이트] 확인 실패: {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+
+        if info is None:
+            if use_json:
+                print(json_output("success", "update", data={
+                    "current_version": current_version,
+                    "update_available": False,
+                }))
+            else:
+                print(f"[업데이트] 최신 버전입니다. (현재: {current_version})")
+            return
+
+        if use_json:
+            print(json_output("success", "update", data={
+                "current_version": current_version,
+                "update_available": True,
+                "latest_version": info.version,
+                "download_url": info.download_url,
+                "published_at": info.published_at,
+                "release_notes": info.release_notes,
+            }))
+        else:
+            print(f"[업데이트] 새 버전 발견: {info.version} (현재: {current_version})")
+            print(f"  게시일: {info.published_at}")
+            print(f"  설치: sonote update --install")
+            if info.release_notes:
+                # 릴리스 노트 앞 3줄만 미리보기
+                preview_lines = info.release_notes.strip().splitlines()[:3]
+                print("  릴리스 노트:")
+                for line in preview_lines:
+                    print(f"    {line}")
+        return
+
+    # --install: 다운로드 + 설치
+    if args.install:
+        # PyInstaller EXE 환경 여부 확인
+        import sys as _sys
+        if not getattr(_sys, "frozen", False):
+            msg = "EXE 환경에서만 자동 설치가 가능합니다. (개발 환경에서는 --check만 사용 가능)"
+            if use_json:
+                print(json_output("error", "update", error=msg, code="ERROR"))
+            else:
+                print(f"[업데이트] {msg}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+
+        try:
+            info = check_for_update()
+        except UpdateError as exc:
+            if use_json:
+                print(json_output("error", "update", error=str(exc), code="ERROR"))
+            else:
+                print(f"[업데이트] 확인 실패: {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+
+        if info is None:
+            if use_json:
+                print(json_output("success", "update", data={
+                    "current_version": current_version,
+                    "update_available": False,
+                }))
+            else:
+                print(f"[업데이트] 이미 최신 버전입니다. (현재: {current_version})")
+            return
+
+        # 사용자 확인 (JSON 모드는 자동 진행)
+        if not use_json:
+            print(f"[업데이트] {current_version} → {info.version}")
+            print(f"  다운로드 URL: {info.download_url}")
+            answer = input("  설치하시겠습니까? [y/N] ").strip().lower()
+            if answer not in ("y", "yes"):
+                print("[업데이트] 설치를 취소했습니다.")
+                return
+
+        # 다운로드
+        import tempfile
+        tmp_dir = Path(tempfile.gettempdir())
+        dest = tmp_dir / f"sonote_{info.version}.exe"
+
+        if not use_json:
+            print(f"[업데이트] 다운로드 중... {info.download_url}")
+
+        last_pct = [-1]
+
+        def _progress(downloaded: int, total: int) -> None:
+            if total <= 0 or use_json:
+                return
+            pct = int(downloaded * 100 / total)
+            if pct != last_pct[0] and pct % 10 == 0:
+                last_pct[0] = pct
+                print(f"  [{pct:3d}%] {downloaded // 1024 // 1024}MB / {total // 1024 // 1024}MB")
+
+        try:
+            from .updater import download_update
+            download_update(info.download_url, dest, progress_callback=_progress)
+        except UpdateError as exc:
+            if use_json:
+                print(json_output("error", "update", error=str(exc), code="ERROR"))
+            else:
+                print(f"[업데이트] 다운로드 실패: {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
+
+        # SHA256 체크섬 검증
+        if info.checksum_sha256:
+            if not use_json:
+                print("[업데이트] SHA256 체크섬 검증 중...")
+            if not verify_checksum(dest, info.checksum_sha256):
+                dest.unlink(missing_ok=True)
+                msg = "체크섬 검증 실패 — 파일이 손상되었거나 변조되었습니다."
+                if use_json:
+                    print(json_output("error", "update", error=msg, code="ERROR"))
+                else:
+                    print(f"[업데이트] {msg}", file=sys.stderr)
+                sys.exit(EXIT_ERROR)
+            if not use_json:
+                print("[업데이트] 체크섬 검증 통과")
+        else:
+            if not use_json:
+                print("[업데이트] 체크섬 정보 없음 — 검증 건너뜀")
+
+        if use_json:
+            print(json_output("success", "update", data={
+                "current_version": current_version,
+                "new_version": info.version,
+                "status": "applying",
+            }))
+        else:
+            print(f"[업데이트] 설치 중... (앱이 재시작됩니다)")
+
+        # 업데이트 적용 (재시작 포함)
+        try:
+            from .updater import apply_update
+            apply_update(dest)
+        except UpdateError as exc:
+            if use_json:
+                print(json_output("error", "update", error=str(exc), code="ERROR"))
+            else:
+                print(f"[업데이트] 설치 실패: {exc}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
 
 
 if __name__ == "__main__":

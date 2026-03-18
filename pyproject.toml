@@ -1,6 +1,6 @@
 [project]
 name = "sonote"
-version = "1.1.0b1"
+version = "1.2.0b2"
 description = "AI 에이전트를 위한 소리 노트 — 실시간 한국어 음성 전사 CLI"
 requires-python = ">=3.11"
 authors = [{ name = "tellang" }]
@@ -28,14 +28,21 @@ dependencies = [
     "uvicorn>=0.27.0",
     "watchdog>=4.0.0",
     "python-multipart>=0.0.9",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
 diarize = ["pyannote-audio>=3.1", "torch>=2.0.0"]
+desktop = [
+    "pywebview>=5.0",
+    "pystray>=0.19.5",
+    "Pillow>=10.0.0",
+]
 docx = ["python-docx>=1.0.0"]
 pdf = [
     "fpdf2>=2.8",
 ]
+media = ["pycaw>=20230407"]
 
 [project.scripts]
 sonote = "src.cli:main"

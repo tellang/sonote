@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import re
 
 __all__ = [
     "Segment",
+    "BETA_MODE",
+    "set_beta_mode",
     "FILLER_WORDS",
     "HALLUCINATION_TEXTS",
     "CORRECTIONS",
@@ -23,6 +26,8 @@ __all__ = [
     "normalize_live_text",
     "postprocess",
 ]
+
+BETA_MODE = os.getenv("SONOTE_BETA") == "1"
 
 
 @dataclass
@@ -47,7 +52,14 @@ HALLUCINATION_TEXTS = {
     "감사합니다", "구독과 좋아요", "다음 영상에서 만나요",
     "자막 제공", "MBC뉴스", "시청해 주셔서 감사합니다",
     "thanks for watching", "please subscribe", "subtitles by",
+    # 일본어 hallucination (Whisper가 무음 구간에서 자주 출력)
+    "ご視聴ありがとうございました", "ご視聴ありがとうございます",
+    "チャンネル登録お願いします", "字幕", "字幕作成",
+    "次の動画でお会いしましょう", "ありがとうございました",
 }
+
+# 일본어 문자 감지 패턴 (히라가나/가타카나)
+_JAPANESE_KANA_RE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
 
 # 도메인 교정 사전 (리서치 v0.0.1 섹션 5-3 기반 확장)
 CORRECTIONS = {
@@ -73,6 +85,20 @@ CORRECTIONS = {
     "프론트앤드": "프론트엔드", "백앤드": "백엔드",
     "데브옵스": "DevOps", "시아이시디": "CI/CD",
 }
+
+_BETA_CORRECTIONS = {
+    "했읍니다": "했습니다",
+    "됬다": "됐다",
+    "프론트앤드": "프론트엔드",
+    "백앤드": "백엔드",
+    "시아이시디": "CI/CD",
+}
+_BETA_HALLUCINATION_TEXTS = HALLUCINATION_TEXTS - {"감사합니다"}
+
+
+def set_beta_mode(enabled: bool) -> None:
+    global BETA_MODE
+    BETA_MODE = bool(enabled)
 
 
 def remove_phrase_repeats(text: str) -> str:
@@ -168,10 +194,19 @@ def add_punctuation(segments: list[Segment], silence_threshold: float = 3.0) -> 
     return punctuated
 
 
-def is_hallucination(text: str) -> bool:
-    """한국어 환각 패턴 감지"""
+def is_hallucination(text: str, language: str = "ko") -> bool:
+    """환각 패턴 감지 — 알려진 hallucination 텍스트 + 언어 불일치 필터.
+
+    language="ko"일 때 히라가나/가타카나가 포함된 텍스트는 hallucination으로 간주.
+    """
     stripped = text.strip()
-    return stripped in HALLUCINATION_TEXTS or len(stripped) < 2
+    hallucination_texts = _BETA_HALLUCINATION_TEXTS if BETA_MODE else HALLUCINATION_TEXTS
+    if stripped in hallucination_texts or len(stripped) < 2:
+        return True
+    # 한국어 모드에서 일본어 가나 문자가 포함되면 hallucination
+    if language == "ko" and _JAPANESE_KANA_RE.search(stripped):
+        return True
+    return False
 
 
 def is_valid_segment(seg) -> bool:
@@ -191,15 +226,17 @@ def is_valid_segment(seg) -> bool:
         return False
     if compression_ratio > 2.4:
         return False
-    if avg_logprob < -1.5:
+    avg_logprob_threshold = -2.0 if BETA_MODE else -1.5
+    if avg_logprob < avg_logprob_threshold:
         return False
     return True
 
 
 def is_looping(text: str, phrase_len: int = 3, threshold: int = 3) -> bool:
     """반복 루핑 감지 — 동일 구절이 threshold회 이상 반복되면 True"""
+    effective_threshold = 4 if BETA_MODE and threshold == 3 else threshold
     words = text.split()
-    if len(words) < phrase_len * threshold:
+    if len(words) < phrase_len * effective_threshold:
         return False
     phrase = tuple(words[:phrase_len])
     count, i = 1, phrase_len
@@ -207,7 +244,7 @@ def is_looping(text: str, phrase_len: int = 3, threshold: int = 3) -> bool:
         if tuple(words[i:i + phrase_len]) == phrase:
             count += 1
             i += phrase_len
-            if count >= threshold:
+            if count >= effective_threshold:
                 return True
         else:
             break
@@ -259,7 +296,8 @@ def normalize_feedback_text(text: str) -> str:
 
 def correct(text: str) -> str:
     """도메인 교정 사전 적용"""
-    for wrong, right in CORRECTIONS.items():
+    corrections = _BETA_CORRECTIONS if BETA_MODE else CORRECTIONS
+    for wrong, right in corrections.items():
         text = text.replace(wrong, right)
     return text
 

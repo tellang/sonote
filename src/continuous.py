@@ -8,10 +8,12 @@ YouTube 라이브 스트림을 청크 단위로 지속 변환
 3. 결과를 출력 파일에 점진적으로 추가
 4. Ctrl+C로 깔끔하게 종료
 """
+import json as _json
 import subprocess
 import shutil
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 from .download import get_stream_url
@@ -21,7 +23,7 @@ from .transcribe import save_transcript, detect_device, _register_cuda_exit_guar
 def continuous_live(
     video_url: str,
     output_path: str | Path,
-    chunk_seconds: int = 120,
+    chunk_seconds: int = 10,
     model_id: str = "large-v3-turbo",
     language: str = "ko",
     device: str | None = None,
@@ -29,6 +31,7 @@ def continuous_live(
     fmt: str = "txt",
     format_id: str = "91",
     beam_size: int = 5,
+    cookies_path: str | Path | None = None,
 ):
     """
     연속 라이브 트랜스크립션 실행
@@ -36,7 +39,7 @@ def continuous_live(
     Args:
         video_url: YouTube 라이브 URL
         output_path: 출력 파일 경로
-        chunk_seconds: 청크 크기 (초, 기본 120)
+        chunk_seconds: 청크 크기 (초, 기본 10)
         model_id: Whisper 모델
         language: 인식 언어
         device: cuda/cpu (None이면 자동)
@@ -44,6 +47,7 @@ def continuous_live(
         fmt: 출력 형식 (txt/srt)
         format_id: yt-dlp 포맷 ID
         beam_size: 빔 서치 크기
+        cookies_path: cookies.txt 경로 (None이면 자동 탐색)
     """
     from faster_whisper import WhisperModel
 
@@ -72,78 +76,60 @@ def continuous_live(
 
     # 스트림 URL 추출
     print("[스트림] URL 추출 중...")
-    stream_url = get_stream_url(video_url, format_id)
+    stream_url = get_stream_url(video_url, format_id, cookies_path=cookies_path)
     print("[스트림] 연결 완료\n")
 
-    # 임시 청크 디렉토리
+    # 순차 다운로드+변환 방식 (segment muxer 대신 — HLS 라이브 호환)
     chunk_dir = Path(tempfile.mkdtemp(prefix="lt-continuous-"))
     all_segments: list[dict] = []
-    processed: set[int] = set()
 
-    # ffmpeg 세그먼트 다운로드 시작
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg가 설치되어 있지 않습니다")
 
-    cmd = [
-        ffmpeg_path,
-        "-i", stream_url,
-        "-vn",
-        "-acodec", "pcm_s16le",
-        "-ar", "16000",
-        "-ac", "1",
-        "-f", "segment",
-        "-segment_time", str(chunk_seconds),
-        str(chunk_dir / "chunk_%04d.wav"),
-        "-y",
-    ]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    print(f"[녹음] 청크 녹음 시작 (청크당 {chunk_seconds}초)\n")
+    print(f"[녹음] 순차 캡처 시작 (청크당 {chunk_seconds}초)\n")
 
     try:
         idx = 0
         while True:
             chunk_file = chunk_dir / f"chunk_{idx:04d}.wav"
-            next_file = chunk_dir / f"chunk_{idx + 1:04d}.wav"
 
-            # 다음 청크 파일이 생기면 = 현재 청크 완성
-            if chunk_file.exists() and next_file.exists() and idx not in processed:
-                _process_chunk(
-                    model, chunk_file, idx, chunk_seconds,
-                    language, beam_size, all_segments,
-                )
-                # 중간 저장
-                if all_segments:
-                    save_transcript(all_segments, output_path, fmt=fmt)
-                processed.add(idx)
-                chunk_file.unlink(missing_ok=True)
-                idx += 1
-            else:
+            # 1) ffmpeg로 N초 캡처
+            dl_cmd = [
+                ffmpeg_path,
+                "-live_start_index", "-1",
+                "-i", stream_url,
+                "-vn", "-acodec", "pcm_s16le",
+                "-ar", "16000", "-ac", "1",
+                "-t", str(chunk_seconds),
+                str(chunk_file), "-y",
+            ]
+            dl_proc = subprocess.run(
+                dl_cmd, capture_output=True, timeout=chunk_seconds + 30,
+            )
+
+            if not chunk_file.exists() or chunk_file.stat().st_size < 2000:
+                print(f"--- 청크 #{idx}: 캡처 실패, 재시도 ---")
                 time.sleep(2)
+                continue
+
+            # 2) Whisper 변환 + SSE push
+            _process_chunk(
+                model, chunk_file, idx, chunk_seconds,
+                language, beam_size, all_segments,
+            )
+
+            # 3) 중간 저장
+            if all_segments:
+                save_transcript(all_segments, output_path, fmt=fmt)
+
+            chunk_file.unlink(missing_ok=True)
+            idx += 1
 
     except KeyboardInterrupt:
-        print("\n\n[중지] Ctrl+C — 마지막 청크 처리 후 종료합니다...")
+        print("\n\n[중지] Ctrl+C — 종료합니다...")
 
     finally:
-        # ffmpeg 종료
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-        # 마지막 미처리 청크
-        last = chunk_dir / f"chunk_{idx:04d}.wav"
-        if last.exists() and idx not in processed:
-            # 최소 크기 체크 (너무 작은 청크는 스킵)
-            if last.stat().st_size > 2000:
-                _process_chunk(
-                    model, last, idx, chunk_seconds,
-                    language, beam_size, all_segments,
-                )
-
-        # 최종 저장
         if all_segments:
             save_transcript(all_segments, output_path, fmt=fmt)
             print(f"\n{'=' * 60}")
@@ -151,7 +137,6 @@ def continuous_live(
         else:
             print("\n[완료] 변환된 세그먼트 없음")
 
-        # 임시 디렉토리 정리
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
@@ -185,10 +170,13 @@ def _process_chunk(
         count = 0
 
         for seg in segments_iter:
+            # avg_logprob(-1.0~0.0)를 0~1 confidence로 선형 매핑하고 범위를 보정
+            confidence = max(0.0, min(1.0, 1.0 + seg.avg_logprob))
             entry = {
                 "start": seg.start + offset,
                 "end": seg.end + offset,
                 "text": seg.text.strip(),
+                "confidence": confidence,
             }
             all_segments.append(entry)
             count += 1
@@ -197,6 +185,23 @@ def _process_chunk(
             ms, ss = divmod(int(entry["start"]), 60)
             me, se = divmod(int(entry["end"]), 60)
             print(f"  [{ms:02d}:{ss:02d} ~ {me:02d}:{se:02d}] {entry['text']}")
+
+            # 서버 SSE로 실시간 push (서버 실행 중이면)
+            try:
+                payload = _json.dumps({
+                    "text": entry["text"],
+                    "ts": f"{ms:02d}:{ss:02d}",
+                    "speaker": "화자",
+                    "confidence": entry.get("confidence"),
+                }).encode()
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8000/api/push-segment",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(req, timeout=2)
+            except Exception:
+                pass  # 서버 미실행 시 무시
 
         print(f"--- 청크 #{chunk_idx}: {count}개 세그먼트 (누적 {len(all_segments)}개) ---\n")
 

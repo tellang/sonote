@@ -199,11 +199,18 @@ def find_builtin_mic() -> int | None:
     return candidates[0][1]
 
 
+# 16kHz 리샘플링을 지원하는 API만 허용 (WASAPI/WDM-KS는 네이티브 레이트만 지원)
+_COMPATIBLE_APIS = {"MME", "DirectSound"}
+
+
 def list_audio_devices() -> list[dict]:
     """사용 가능한 오디오 입력 장치 목록 반환.
 
+    WASAPI/WDM-KS 디바이스는 16kHz 리샘플링을 지원하지 않으므로
+    MME/DirectSound API 장치만 반환한다.
+
     Returns:
-        [{"index": int, "name": str, "channels": int, "sample_rate": float}, ...]
+        [{"index": int, "name": str, "channels": int, "sample_rate": float, "api": str}, ...]
     """
     devices: list[dict] = []
 
@@ -212,12 +219,20 @@ def list_audio_devices() -> list[dict]:
         if max_input_channels <= 0:
             continue
 
+        api_info = sd.query_hostapis(dev["hostapi"])
+        api_name = api_info.get("name", "")
+
+        # MME/DirectSound만 허용 (16kHz 리샘플링 지원)
+        if not any(compat in api_name for compat in _COMPATIBLE_APIS):
+            continue
+
         devices.append(
             {
                 "index": idx,
                 "name": str(dev.get("name", "")),
                 "channels": max_input_channels,
                 "sample_rate": float(dev.get("default_samplerate", 0.0)),
+                "api": api_name,
             }
         )
 

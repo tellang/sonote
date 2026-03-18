@@ -35,3 +35,6 @@ build/
 # 민감 파일
 .env
 .cookie
+
+# 파인튜닝 모델 (1.5GB+)
+models/

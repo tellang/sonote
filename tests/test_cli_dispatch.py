@@ -35,6 +35,21 @@ class CliDispatchTests(unittest.TestCase):
         self.assertEqual(parsed_args.command, "meeting")
         self.assertTrue(parsed_args.no_diarize)
 
+    def test_desktop_command_dispatch(self) -> None:
+        with patch.object(cli, "_cmd_desktop") as handler:
+            with patch.object(
+                sys,
+                "argv",
+                ["media-transcriber", "desktop", "--port", "19000"],
+            ):
+                cli.main()
+
+        handler.assert_called_once()
+        parsed_args = handler.call_args.args[0]
+        self.assertEqual(parsed_args.command, "desktop")
+        self.assertEqual(parsed_args.port, 19000)
+        self.assertEqual(parsed_args.host, "127.0.0.1")
+
     def test_approve_profiles_command_dispatch(self) -> None:
         with patch.object(cli, "_cmd_approve_profiles") as handler:
             with patch.object(
@@ -87,6 +102,20 @@ class CliDispatchTests(unittest.TestCase):
         handler.assert_called_once()
         parsed_args = handler.call_args.args[0]
         self.assertEqual(parsed_args.url, "https://youtube.com/watch?v=test")
+
+    def test_autostart_command_dispatch(self) -> None:
+        with patch.object(cli, "_cmd_autostart") as handler:
+            with patch.object(
+                sys,
+                "argv",
+                ["media-transcriber", "autostart", "--status"],
+            ):
+                cli.main()
+
+        handler.assert_called_once()
+        parsed_args = handler.call_args.args[0]
+        self.assertEqual(parsed_args.command, "autostart")
+        self.assertTrue(parsed_args.status)
 
     def test_ssafy_command_is_not_available(self) -> None:
         with patch.object(sys, "argv", ["media-transcriber", "ssafy"]):

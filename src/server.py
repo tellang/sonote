@@ -20,7 +20,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .paths import OUTPUT_ROOT
+from .paths import OUTPUT_ROOT, static_dir
+
+_BETA_ENV_KEY = "SONOTE_BETA"
 
 # --- 보안 하드닝 상수 ---
 MAX_WS_CONNECTIONS = 50  # WebSocket 최대 동시 연결 수
@@ -41,7 +43,7 @@ _start_time: float = 0.0
 _segment_count: int = 0
 _speakers: set[str] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
-_paused: bool = False
+_paused: bool = True  # 녹음은 사용자가 수동으로 시작
 _manual_keywords: set[str] = set()
 _extracted_keywords: set[str] = set()
 _promoted_keywords: set[str] = set()
@@ -64,6 +66,10 @@ _audio_device_switch_event = threading.Event()
 _startup_phase: str = ""
 _startup_message: str = ""
 _startup_ready: bool = False
+_capture_error: str = ""
+_capture_error_count: int = 0
+_voice_active: bool = False
+_voice_active_ts: float = 0.0
 _postprocess_status_file: str | None = None
 
 # 세션 회전 상태 — threading.Event로 스레드 안전 보장
@@ -355,6 +361,24 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="회의 실시간 전사", lifespan=lifespan)
 
 
+def _apply_beta_mode(beta_mode: bool | None = None) -> None:
+    enabled = os.getenv(_BETA_ENV_KEY) == "1" if beta_mode is None else bool(beta_mode)
+    if enabled:
+        os.environ[_BETA_ENV_KEY] = "1"
+    try:
+        from .postprocess import set_beta_mode
+
+        set_beta_mode(enabled)
+    except Exception:
+        pass
+
+
+def create_app(*, beta_mode: bool | None = None) -> FastAPI:
+    """데스크톱/CLI 런처가 재사용할 FastAPI 앱 인스턴스를 반환한다."""
+    _apply_beta_mode(beta_mode)
+    return app
+
+
 def is_session_rotate_requested() -> bool:
     """세션 회전 요청 상태 반환."""
     return _session_rotate_event.is_set()
@@ -405,10 +429,17 @@ def _resolve_device_name(device: int | None, devices: list[dict]) -> str:
     return f"장치 {device}"
 
 
+_audio_device_switch_ts: float = 0.0
+
 def _audio_device_payload(devices: list[dict] | None = None) -> dict:
+    global _audio_device_switching
     if devices is None:
         devices = _list_input_devices()
     with _audio_device_lock:
+        # 전환 10초 초과 시 자동 해제 (캡처 루프 에러로 리셋 못 한 경우)
+        if _audio_device_switching and _audio_device_switch_ts > 0 and (time.time() - _audio_device_switch_ts) > 10:
+            _audio_device_switching = False
+            _audio_device_switch_event.clear()
         current = _current_audio_device
         requested = _requested_audio_device
         switching = _audio_device_switching
@@ -443,6 +474,8 @@ def request_audio_device_switch(device: int | None) -> bool:
         _requested_audio_device = device
         _audio_device_switching = True
         _audio_device_error = ""
+        global _audio_device_switch_ts
+        _audio_device_switch_ts = time.time()
         _audio_device_switch_event.set()
         return True
 
@@ -463,6 +496,21 @@ def set_startup_status(phase: str, message: str = "", ready: bool = False) -> No
     _startup_phase = phase
     _startup_message = message
     _startup_ready = ready
+
+
+def set_capture_error(error: str, count: int = 0) -> None:
+    """캡처 루프 에러를 상태 API에 노출한다."""
+    global _capture_error, _capture_error_count
+    _capture_error = error
+    _capture_error_count = count
+
+
+def set_voice_active(active: bool) -> None:
+    """음성 감지 상태를 갱신한다."""
+    global _voice_active, _voice_active_ts
+    _voice_active = active
+    if active:
+        _voice_active_ts = time.time()
 
 
 def _keyword_payload() -> dict:
@@ -503,9 +551,60 @@ def add_extracted_keywords(keywords: list[str], promote_threshold: int = 2) -> d
 @app.get("/")
 async def index() -> HTMLResponse:
     """static/viewer.html 읽어서 HTMLResponse 반환"""
-    viewer_path = Path(__file__).resolve().parent.parent / "static" / "viewer.html"
+    viewer_path = static_dir() / "viewer.html"
     html = viewer_path.read_text(encoding="utf-8")
     return HTMLResponse(content=html)
+
+
+@app.get("/settings")
+async def settings_page() -> HTMLResponse:
+    """static/settings.html 설정 페이지 반환."""
+    settings_path = static_dir() / "settings.html"
+    if not settings_path.exists():
+        return HTMLResponse(content="<h1>설정 페이지를 찾을 수 없습니다.</h1>", status_code=404)
+    html = settings_path.read_text(encoding="utf-8")
+    return HTMLResponse(content=html)
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """현재 설정 반환."""
+    try:
+        from .config import get_config
+        cfg = get_config()
+        return cfg.to_dict()
+    except Exception:
+        return {}
+
+
+@app.post("/api/settings")
+async def save_settings(request: Request):
+    """설정 저장."""
+    try:
+        from .config import get_config
+        data = await request.json()
+        cfg = get_config()
+        for key, value in data.items():
+            cfg.set(key, value)
+        cfg.save()
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/audio-devices")
+async def list_audio_devices():
+    """사용 가능한 오디오 입력 장치 목록 반환."""
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        result = []
+        for i, d in enumerate(devices):
+            if d.get("max_input_channels", 0) > 0:
+                result.append({"id": i, "name": d["name"]})
+        return result
+    except Exception:
+        return []
 
 
 @app.get("/stream")
@@ -699,6 +798,13 @@ async def status() -> dict:
             "message": _startup_message or "회의 세션 준비 중...",
             "ready": _startup_ready,
         }
+    # 음성 감지 상태 (2초 이내 활성이면 True)
+    result["voice_active"] = _voice_active and (now - _voice_active_ts < 2.0)
+    if _capture_error:
+        result["capture_error"] = {
+            "message": _capture_error,
+            "count": _capture_error_count,
+        }
     if _postprocess_phase:
         result["postprocess"] = {
             "phase": _postprocess_phase,
@@ -721,10 +827,7 @@ async def status() -> dict:
 async def toggle_pause(request: Request) -> dict:
     """일시정지/재개 토글. 일시정지 시 STT 처리를 건너뛴다."""
     _verify_api_key(request)
-    global _paused
-    _paused = not _paused
-    state = "paused" if _paused else "recording"
-    return {"paused": _paused, "state": state}
+    return toggle_pause_state()
 
 
 @app.post("/add-keyword")
@@ -795,6 +898,14 @@ def is_paused() -> bool:
     return _paused
 
 
+def toggle_pause_state() -> dict[str, bool | str]:
+    """현재 녹음 일시정지 상태를 토글하고 최신 상태를 반환한다."""
+    global _paused
+    _paused = not _paused
+    state = "paused" if _paused else "recording"
+    return {"paused": _paused, "state": state}
+
+
 def get_keywords() -> set[str]:
     """현재 initial_prompt에 반영할 활성 키워드 집합 반환."""
     return _manual_keywords.union(_promoted_keywords)
@@ -804,9 +915,7 @@ def get_keywords() -> set[str]:
 async def shutdown(request: Request) -> dict:
     """저장 & 종료 요청. CLI 루프에서 감지하여 graceful shutdown."""
     _verify_api_key(request)
-    global _shutdown_requested
-    _shutdown_requested = True
-    return {"shutdown": True, "message": "저장 후 종료합니다..."}
+    return request_shutdown()
 
 
 @app.get("/speakers")
@@ -1266,6 +1375,50 @@ async def export_session_endpoint(
     return PlainTextResponse(content=text_content, media_type=media_type)
 
 
+@app.post("/api/push-segment")
+async def push_segment_endpoint(request: Request) -> dict:
+    """단일 세그먼트를 SSE로 push. continuous 모드에서 호출."""
+    body = await request.json()
+    text = body.get("text", "").strip()
+    ts = body.get("ts", "")
+    speaker = body.get("speaker", "화자")
+    confidence = body.get("confidence")
+    if text:
+        await push_transcript(speaker, text, ts, confidence=confidence)
+    return {"ok": True}
+
+
+@app.post("/api/load-transcript")
+async def load_transcript_file(request: Request) -> dict:
+    """스트림 전사 파일을 로드하여 뷰어에 SSE로 푸시한다.
+
+    Body: {"path": "output/transcripts/2026-03-16/transcript.corrected.txt"}
+    """
+    import re as _re
+
+    body = await request.json()
+    file_path = Path(body.get("path", ""))
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail=f"파일을 찾을 수 없습니다: {file_path}")
+
+    text = file_path.read_text(encoding="utf-8")
+    # [HH:MM ~ HH:MM] 텍스트 형식 파싱
+    pattern = _re.compile(r"\[(\d{2}:\d{2})\s*~\s*(\d{2}:\d{2})\]\s*(.*)")
+    count = 0
+    for line in text.strip().splitlines():
+        m = pattern.match(line.strip())
+        if not m:
+            continue
+        ts_start, _ts_end, segment_text = m.groups()
+        await push_transcript("화자", segment_text.strip(), ts_start)
+        count += 1
+
+    # startup 상태를 ready로 전환
+    set_startup_status("ready", "스트림 전사 로드 완료", ready=True)
+
+    return {"loaded": count, "file": str(file_path)}
+
+
 def _read_profiles_json() -> dict:
     """화자 프로필 JSON 파일을 읽어 반환한다. 파일이 없으면 빈 구조 반환."""
     profiles_file = Path(_profiles_path) if _profiles_path else (OUTPUT_ROOT / "data" / "speakers.json")
@@ -1422,7 +1575,7 @@ def _find_matching_profile(
 @app.get("/speaker-profile")
 async def speaker_profile_page() -> FileResponse:
     """화자 프로필 관리 HTML 페이지 서빙."""
-    html_path = Path(__file__).resolve().parent.parent / "static" / "speaker_profile.html"
+    html_path = static_dir() / "speaker_profile.html"
     if not html_path.is_file():
         raise HTTPException(status_code=404, detail="speaker_profile.html을 찾을 수 없습니다.")
     return FileResponse(str(html_path), media_type="text/html")
@@ -1702,7 +1855,7 @@ async def new_session(request: Request) -> dict:
     # 미등록 화자 임시 데이터 리셋
     _unknown_tracker.reset()
 
-    # 세션 회전 플래그 설정 (CLI 루프에서 감지 → 콜백 호출)
+    # 세션 회전 플래그 설정 (CLI/desktop 루프에서 consume_session_rotate()로 감지 → 콜백 호출)
     _session_rotate_event.set()
 
     new_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -1712,6 +1865,13 @@ async def new_session(request: Request) -> dict:
 def is_shutdown_requested() -> bool:
     """종료 요청 상태 반환 (CLI 루프에서 참조)."""
     return _shutdown_requested
+
+
+def request_shutdown() -> dict[str, bool | str]:
+    """저장 후 종료 플래그를 설정하고 응답 페이로드를 반환한다."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    return {"shutdown": True, "message": "저장 후 종료합니다..."}
 
 
 def set_diarizer(diarizer, profiles_path: str | None = None) -> None:
@@ -1734,8 +1894,15 @@ def set_postprocess_status_file(path: str | None) -> None:
     _postprocess_status_file = path
 
 
-async def push_transcript(speaker: str, text: str, timestamp: str) -> None:
-    """큐에 전사 결과 push (외부에서 호출)"""
+async def push_transcript(
+    speaker: str,
+    text: str,
+    timestamp: str,
+    *,
+    count_segment: bool = True,
+    confidence: float | None = None,
+) -> None:
+    """큐에 전사 결과 push (외부에서 호출). confidence: 0~1 (낮을수록 불확실)"""
     global _segment_count
 
     normalized_speaker = (speaker or "?").strip() or "?"
@@ -1745,7 +1912,8 @@ async def push_transcript(speaker: str, text: str, timestamp: str) -> None:
     if not normalized_timestamp:
         normalized_timestamp = time.strftime("%H:%M:%S", time.localtime())
 
-    _segment_count += 1
+    if count_segment:
+        _segment_count += 1
     _speakers.add(normalized_speaker)
 
     item = {
@@ -1753,6 +1921,8 @@ async def push_transcript(speaker: str, text: str, timestamp: str) -> None:
         "text": normalized_text,
         "ts": normalized_timestamp,
     }
+    if confidence is not None:
+        item["confidence"] = round(confidence, 3)
     _transcript_history.append(item)
     await _broadcast_item(item)
 
@@ -1792,9 +1962,14 @@ async def push_correction(corrections: list[dict]) -> None:
 
 def push_transcript_sync(speaker: str, text: str, timestamp: str) -> None:
     """스레드 안전한 동기 래퍼 — 별도 스레드에서 SSE 큐에 push."""
+    global _segment_count
+
+    # status API의 세그먼트 수를 동기 호출 시점에 즉시 반영
+    _segment_count += 1
+
     if _event_loop is not None and _event_loop.is_running():
         asyncio.run_coroutine_threadsafe(
-            push_transcript(speaker, text, timestamp),
+            push_transcript(speaker, text, timestamp, count_segment=False),
             _event_loop,
         )
 
@@ -1804,15 +1979,27 @@ def push_correction_sync(corrections: list[dict]) -> None:
         asyncio.run_coroutine_threadsafe(push_correction(corrections), _event_loop)
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+def run_server(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    application: FastAPI | None = None,
+    beta_mode: bool | None = None,
+) -> None:
     """uvicorn으로 서버 실행. threading에서 호출할 수 있도록 uvicorn.run() 사용."""
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    _apply_beta_mode(beta_mode)
+    uvicorn.run(
+        application or create_app(beta_mode=beta_mode),
+        host=host,
+        port=port,
+        log_level="info",
+    )
 
 
 __all__ = [
     "app",
+    "create_app",
     "index",
     "stream",
     "status",
@@ -1826,6 +2013,7 @@ __all__ = [
     "_connected_websockets",
     "ws_transcribe",
     "is_paused",
+    "toggle_pause_state",
     "add_keyword",
     "remove_keyword",
     "list_keywords",
@@ -1835,9 +2023,12 @@ __all__ = [
     "get_audio_device_switch_event",
     "set_current_audio_device",
     "set_startup_status",
+    "set_capture_error",
+    "set_voice_active",
     "switch_device",
     "shutdown",
     "is_shutdown_requested",
+    "request_shutdown",
     "set_postprocess_status",
     "set_postprocess_status_file",
     "list_sessions",

@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>sonote — 실시간 회의 전사</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='64' height='64' viewBox='0 0 64 64' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cdefs%3E%3ClinearGradient id='bg_grad' x1='0' y1='0' x2='64' y2='64' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0%25' stop-color='%235865F2'/%3E%3Cstop offset='100%25' stop-color='%237B68EE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23bg_grad)'/%3E%3Cpath d='M32 14C27.5817 14 24 17.5817 24 22V30C24 34.4183 27.5817 38 32 38C36.4183 38 40 34.4183 40 30V22C40 17.5817 36.4183 14 32 14Z' fill='white'/%3E%3Cpath d='M46 28V30C46 37.1797 40.1797 43 33 43.92V48H39V51H25V48H31V43.92C23.8203 43 18 37.1797 18 30V28H21V30C21 36.0751 25.9249 41 32 41C38.0751 41 43 36.0751 43 30V28H46Z' fill='white'/%3E%3Cpath d='M26 56C28 54.5 30 54.5 32 56C34 57.5 36 57.5 38 56' stroke='white' stroke-width='2' stroke-linecap='round' opacity='0.8'/%3E%3Cpath d='M24 59.5C27 58 30 58 32 59.5C34 61 37 61 40 59.5' stroke='white' stroke-width='1.5' stroke-linecap='round' opacity='0.6'/%3E%3Cpath d='M28 52.5C30 51.5 32 51.5 34 52.5' stroke='white' stroke-width='2' stroke-linecap='round' opacity='0.4'/%3E%3C/svg%3E">
     <style>
         :root, :root[data-theme="dark"] {
             /* === Surface 계층 (OKLCH 기반) === */
@@ -16,6 +17,7 @@
             --text-primary:     oklch(0.93 0.005 270);
             --text-secondary:   oklch(0.65 0.01 270);
             --text-tertiary:    oklch(0.58 0.01 270);
+            --text-on-solid:    oklch(0.98 0.005 270);
 
             /* === 시맨틱 === */
             --accent:           oklch(0.68 0.16 250);
@@ -54,6 +56,7 @@
             --text-primary:     oklch(0.20 0.01 270);
             --text-secondary:   oklch(0.40 0.01 270);
             --text-tertiary:    oklch(0.42 0.01 270);
+            --text-on-solid:    oklch(0.15 0.01 270);
 
             --accent:           oklch(0.55 0.16 250);
             --ok:               oklch(0.45 0.15 145);
@@ -983,6 +986,7 @@
             border-radius: 8px;
             border: 1px solid var(--border);
             background: transparent;
+            color: var(--text-primary);
             font-size: var(--text-xs);
             font-weight: 600;
             cursor: pointer;
@@ -1001,14 +1005,23 @@
 
         #btn-pause {
             color: var(--ok);
+            transition: all var(--dur-normal) var(--ease-out-expo);
         }
 
         #btn-pause.paused {
             color: var(--warn);
-            border-color: color-mix(in oklch, var(--warn) 40%, transparent);
+            background: color-mix(in oklch, var(--warn) 15%, transparent);
+            border-color: color-mix(in oklch, var(--warn) 50%, transparent);
+            box-shadow: 0 0 12px color-mix(in oklch, var(--warn) 25%, transparent);
+            animation: pause-pulse 2s ease-in-out infinite;
         }
 
-        #btn-shutdown {
+        @keyframes pause-pulse {
+            0%, 100% { box-shadow: 0 0 8px color-mix(in oklch, var(--warn) 20%, transparent); }
+            50% { box-shadow: 0 0 16px color-mix(in oklch, var(--warn) 40%, transparent); }
+        }
+
+        #btn-save-session {
             color: var(--danger);
             border-color: color-mix(in oklch, var(--danger) 30%, transparent);
         }
@@ -1259,7 +1272,7 @@
         }
         #transcript:hover::-webkit-scrollbar-thumb {
             background-color: oklch(var(--overlay-base) / 0.25);
-            border: 3px solid transparent;
+            border: 5px solid transparent; /* 고정 두께: hover 시 색상만 변경하여 점프 방지 */
         }
         #transcript::-webkit-scrollbar-thumb:hover {
             background-color: oklch(var(--overlay-base) / 0.4);
@@ -1268,7 +1281,7 @@
         /* === 전사 라인 === */
         #transcript p {
             margin: 0;
-            padding: 10px 0;
+            padding: 6px 0;
             border-bottom: 1px solid oklch(var(--overlay-base) / 0.04);
             display: grid;
             grid-template-columns: auto auto 1fr;
@@ -1284,32 +1297,83 @@
             filter: grayscale(0.2);
         }
 
-        /* PiP 전용 스타일 (클래스 기반) */
+        /* PiP 전용 스타일 — Apple Minimalist */
+        .pip-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px 6px;
+            -webkit-app-region: drag;
+            user-select: none;
+        }
+
+        .pip-live-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--danger);
+            box-shadow: 0 0 8px oklch(var(--overlay-base) / 0.3);
+            animation: pip-pulse 2.5s infinite ease-in-out;
+        }
+
+        @keyframes pip-pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
+
+        #pip-timer {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            letter-spacing: -0.02em;
+        }
+
+        .pip-mode {
+            padding: 4px 14px 14px !important;
+        }
+
         .pip-mode p {
-            padding: 8px 0 !important;
-            grid-template-columns: 4px 1fr !important; /* 화자 라벨 대신 얇은 바 */
-            column-gap: 8px !important;
+            padding: 2px 0 !important;
+            grid-template-columns: 3px 1fr !important;
+            gap: 8px !important;
+            border: none !important;
+            line-height: 1.3 !important;
+            word-break: normal !important;
         }
 
         .pip-mode .timestamp {
-            display: none !important; /* PiP에선 시간 숨김 */
+            display: none !important;
         }
 
         .pip-mode .speaker-label {
-            width: 4px !important;
-            min-width: 4px !important;
+            width: 3px !important;
+            min-width: 3px !important;
             height: 100% !important;
             padding: 0 !important;
             border: none !important;
-            border-radius: 2px !important;
-            font-size: 0 !important; /* 텍스트 숨김 */
+            border-radius: 10px !important;
+            font-size: 0 !important;
             background: currentColor !important;
             align-self: stretch !important;
         }
 
         .pip-mode .text {
-            font-size: 0.95rem !important;
-            line-height: 1.4 !important;
+            font-size: 14px !important;
+            line-height: 1.45 !important;
+            letter-spacing: -0.02em;
+            word-break: break-all !important;
+            overflow-wrap: break-word !important;
+        }
+
+        /* 신뢰도 낮은 세그먼트: 어둡게 표시 */
+        .low-confidence {
+            opacity: 0.45 !important;
+            filter: grayscale(0.4) !important;
+        }
+
+        .pip-mode::-webkit-scrollbar {
+            width: 0;
         }
 
         /* 최근 3개 문장까지 단계별 강조 (가장 최근이 가장 밝음) */
@@ -1756,7 +1820,7 @@
             top: -4px;
             right: -4px;
             background: var(--accent);
-            color: white;
+            color: var(--text-on-solid);
             font-size: 0.65rem;
             width: 16px;
             height: 16px;
@@ -2090,7 +2154,7 @@
 
         .modal-btn-confirm {
             background: var(--danger);
-            color: white;
+            color: var(--text-on-solid);
         }
 
         .modal-btn:hover {
@@ -2122,6 +2186,505 @@
             50% { transform: scaleY(1.8); opacity: 1; }
         }
 
+        /* === 로딩 스플래시 (Discord 스타일 — 작은 중앙 카드) === */
+        .loading-splash {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: var(--surface-base);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.5s var(--ease-out-expo), visibility 0.5s;
+            /* GPU 합성 레이어 힌트 — 페이드아웃 애니메이션 최적화 */
+            transform: translateZ(0);
+            will-change: opacity;
+        }
+        .loading-splash.hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+        .loading-card {
+            width: 280px;
+            padding: 40px 32px 32px;
+            background: var(--surface-1);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            box-shadow: 0 8px 32px oklch(0 0 0 / 0.3);
+            animation: card-pop 0.4s var(--ease-out-expo);
+        }
+        @keyframes card-pop {
+            from { transform: scale(0.9); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        .loading-logo {
+            width: 56px;
+            height: 56px;
+            position: relative;
+        }
+        .loading-ring {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 2.5px solid var(--surface-3);
+            border-top-color: var(--accent);
+            animation: splash-spin 1s linear infinite;
+            transition: border-top-color 0.3s ease;
+        }
+        /* 연결 실패 상태 — 링 색상 변경 */
+        .loading-splash.state-failed .loading-ring {
+            border-top-color: var(--danger);
+            animation-duration: 2s; /* 실패 시 느리게 */
+        }
+        /* 재시도 상태 — 경고 색상 */
+        .loading-splash.state-retry .loading-ring {
+            border-top-color: var(--warn);
+        }
+        .loading-mic {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            color: var(--text-primary);
+        }
+        /* Lottie 플레이어 — CSS 스피너와 동일 크기로 오버레이 */
+        .loading-lottie {
+            width: 56px;
+            height: 56px;
+            position: absolute;
+            inset: 0;
+        }
+        @keyframes splash-spin {
+            to { transform: rotate(360deg); }
+        }
+        .loading-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+        .loading-status {
+            font-size: var(--text-xs);
+            color: var(--text-tertiary);
+            text-align: center;
+            min-height: 1.4em;
+            transition: color 0.3s ease;
+        }
+        /* 연결 상태별 텍스트 색상 */
+        .loading-splash.state-failed .loading-status {
+            color: var(--danger);
+        }
+        .loading-splash.state-retry .loading-status {
+            color: var(--warn);
+        }
+        .loading-splash.state-loading .loading-status {
+            color: var(--text-tertiary);
+        }
+        /* 재연결 카운트다운 표시 (Discord "Retrying in X seconds..." 패턴) */
+        .loading-retry-countdown {
+            font-size: var(--text-xs);
+            color: var(--warn);
+            text-align: center;
+            display: none;
+        }
+        .loading-splash.state-retry .loading-retry-countdown {
+            display: block;
+        }
+        .loading-progress {
+            width: 100%;
+            height: 3px;
+            background: var(--surface-3);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .loading-progress-bar {
+            height: 100%;
+            width: 30%;
+            background: var(--accent);
+            border-radius: 2px;
+            animation: progress-indeterminate 1.8s ease-in-out infinite;
+            transition: background 0.3s ease;
+        }
+        /* 실패/재시도 시 프로그레스 바 색상 변경 */
+        .loading-splash.state-failed .loading-progress-bar {
+            background: var(--danger);
+            animation-play-state: paused;
+        }
+        .loading-splash.state-retry .loading-progress-bar {
+            background: var(--warn);
+        }
+        @keyframes progress-indeterminate {
+            0% { width: 0%; margin-left: 0; }
+            50% { width: 40%; margin-left: 30%; }
+            100% { width: 0%; margin-left: 100%; }
+        }
+
+        /* === Settings 인라인 슬라이드-오버 패널 === */
+        .settings-overlay {
+            position: fixed;
+            inset: 0;
+            background: oklch(0 0 0 / 0.35);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            z-index: 500;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--dur-normal) var(--ease-out-expo);
+        }
+        .settings-overlay.open {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .settings-slide-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: min(380px, 90vw);
+            height: 100vh;
+            background: var(--surface-1);
+            border-left: 1px solid var(--border);
+            z-index: 501;
+            transform: translateX(100%);
+            transition: transform var(--dur-slow) var(--ease-out-expo);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .settings-slide-panel.open {
+            transform: translateX(0);
+        }
+        .settings-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 20px 12px;
+            border-bottom: 1px solid var(--border-subtle);
+            flex-shrink: 0;
+        }
+        .settings-panel-title {
+            font-size: var(--text-lg);
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: -0.02em;
+        }
+        .settings-panel-close {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            transition: all var(--dur-fast);
+            padding: 0;
+        }
+        .settings-panel-close:hover {
+            background: oklch(var(--overlay-base) / 0.08);
+            color: var(--text-primary);
+        }
+        .settings-panel-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .settings-panel-body::-webkit-scrollbar { width: 6px; }
+        .settings-panel-body::-webkit-scrollbar-thumb {
+            background: oklch(var(--overlay-base) / 0.1);
+            border-radius: 3px;
+        }
+        .sp-card {
+            background: oklch(var(--overlay-base) / 0.03);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 16px;
+        }
+        .sp-section-title {
+            font-size: 0.68rem;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 12px;
+            font-family: var(--font-mono);
+        }
+        .sp-field { margin-bottom: 12px; }
+        .sp-field:last-child { margin-bottom: 0; }
+        .sp-field-label {
+            display: block;
+            font-size: var(--text-xs);
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        .sp-field-select,
+        .sp-field-input {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: var(--text-xs);
+            font-family: var(--font-sans);
+            outline: none;
+            transition: border-color var(--dur-fast);
+        }
+        .sp-field-select {
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            cursor: pointer;
+        }
+        .sp-field-select:focus,
+        .sp-field-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 15%, transparent);
+        }
+        .sp-field-input::placeholder { color: var(--text-tertiary); }
+        .sp-toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+        }
+        .sp-toggle-row + .sp-toggle-row {
+            border-top: 1px solid var(--border-subtle);
+        }
+        .sp-toggle-label {
+            font-size: var(--text-xs);
+            color: var(--text-primary);
+        }
+        .sp-toggle-desc {
+            font-size: 0.68rem;
+            color: var(--text-tertiary);
+            margin-top: 1px;
+        }
+        .sp-toggle-switch {
+            position: relative;
+            width: 42px;
+            height: 24px;
+            background: var(--surface-3);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.25s ease;
+            flex-shrink: 0;
+            margin-left: 12px;
+        }
+        .sp-toggle-switch.on {
+            background: color-mix(in oklch, var(--accent) 50%, transparent);
+        }
+        .sp-toggle-knob {
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 18px;
+            height: 18px;
+            background: var(--text-tertiary);
+            border-radius: 50%;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .sp-toggle-switch.on .sp-toggle-knob {
+            left: 21px;
+            background: var(--accent);
+            box-shadow: 0 0 8px color-mix(in oklch, var(--accent) 30%, transparent);
+        }
+        .sp-save-btn {
+            width: 100%;
+            padding: 12px;
+            border-radius: 10px;
+            border: none;
+            background: var(--accent);
+            color: var(--text-on-solid);
+            font-size: var(--text-sm);
+            font-weight: 600;
+            font-family: var(--font-sans);
+            cursor: pointer;
+            transition: all var(--dur-fast);
+        }
+        .sp-save-btn:hover {
+            filter: brightness(1.1);
+        }
+        .sp-save-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .sp-save-status {
+            text-align: center;
+            font-size: var(--text-xs);
+            height: 1.2em;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .sp-save-status.show { opacity: 1; }
+        .sp-save-status.ok { color: var(--ok); }
+        .sp-save-status.error { color: var(--danger); }
+
+        /* === 타이핑 인디케이터 (전사 영역 하단) === */
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            padding: 8px 12px;
+            font-size: var(--text-xs);
+            color: var(--text-tertiary);
+        }
+        .typing-indicator.active {
+            display: flex;
+        }
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--text-tertiary);
+            animation: typing-pulse 1.4s ease-in-out infinite;
+        }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing-pulse {
+            0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+            40% { opacity: 1; transform: scale(1); }
+        }
+
+        /* === 온보딩 안내 카드 === */
+        .onboarding-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            padding: 48px 24px;
+            text-align: center;
+            color: var(--text-tertiary);
+        }
+        .onboarding-icon {
+            font-size: 2.5rem;
+            opacity: 0.3;
+        }
+        .onboarding-title {
+            font-size: var(--text-base);
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+        .onboarding-desc {
+            font-size: var(--text-sm);
+            line-height: 1.6;
+            max-width: 280px;
+        }
+        /* 녹음 시작 버튼 — 초록 펄스 */
+        .record-start-btn {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: none;
+            background: var(--success, oklch(0.65 0.18 145));
+            color: white;
+            cursor: pointer;
+            margin-top: 12px;
+            transition: transform 0.2s ease, opacity 0.2s ease;
+        }
+        .record-start-btn:hover:not(:disabled) {
+            transform: scale(1.06);
+        }
+        .record-start-btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+        .record-start-btn:disabled .record-start-pulse {
+            animation: none;
+        }
+        .record-start-label {
+            position: relative;
+            z-index: 1;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+        }
+        .record-start-pulse {
+            position: absolute;
+            inset: -8px;
+            border-radius: 50%;
+            background: var(--success, oklch(0.65 0.18 145));
+            opacity: 0;
+            animation: rec-pulse 2s ease-out infinite;
+        }
+        @keyframes rec-pulse {
+            0%   { transform: scale(0.85); opacity: 0.5; }
+            100% { transform: scale(1.3);  opacity: 0; }
+        }
+
+        .onboarding-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            text-align: left;
+            font-size: var(--text-xs);
+            color: var(--text-secondary);
+        }
+        .onboarding-step {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .onboarding-step-num {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: color-mix(in oklch, var(--accent) 15%, transparent);
+            color: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.68rem;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        /* === 사이드바 설정 버튼 === */
+        .sidebar-settings-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            width: 100%;
+            padding: 9px 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: var(--text-xs);
+            font-weight: 500;
+            font-family: var(--font-sans);
+            cursor: pointer;
+            transition: all var(--dur-fast) var(--ease-out-expo);
+            margin-top: 8px;
+        }
+        .sidebar-settings-btn:hover {
+            background: oklch(var(--overlay-base) / 0.06);
+            color: var(--text-primary);
+            border-color: color-mix(in oklch, var(--accent) 30%, transparent);
+        }
+
         /* === 교정 하이라이트 애니메이션 === */
         .transcript p.corrected {
             background: color-mix(in oklch, var(--accent) 15%, transparent);
@@ -2139,8 +2702,32 @@
             transition: color 1.5s ease-out;
         }
     </style>
+    <!-- Lottie 웹 컴포넌트 — 로딩 스플래시 마이크/음파 애니메이션용
+         CDN 로드 실패 시 CSS 스피너로 자동 fallback (JS에서 처리) -->
+    <script src="https://unpkg.com/@lottiefiles/lottie-player@2/dist/lottie-player.js"
+            defer
+            onerror="window.__lottieLoadFailed = true;"></script>
 </head>
 <body>
+    <!-- 로딩 스플래시 (Discord 스타일 — 작은 중앙 카드) -->
+    <div class="loading-splash state-loading" id="loading-splash">
+        <div class="loading-card">
+            <div class="loading-logo">
+                <!-- CSS 스피너 (Lottie 로드 실패 시 fallback으로 항상 유지) -->
+                <div class="loading-ring" id="loading-ring"></div>
+                <!-- Lottie 마이크/음파 애니메이션 — CDN 로드 성공 시 표시 -->
+                <div class="loading-lottie" id="loading-lottie" style="display:none;"></div>
+                <!-- Lottie 미지원 환경 fallback 이모지 -->
+                <div class="loading-mic" id="loading-mic">🎙</div>
+            </div>
+            <div class="loading-title">sonote</div>
+            <div class="loading-status" id="loading-status">시작하는 중...</div>
+            <!-- 재연결 카운트다운 (state-retry 상태에서만 표시) -->
+            <div class="loading-retry-countdown" id="loading-retry-countdown">잠시 후 재시도합니다...</div>
+            <div class="loading-progress"><div class="loading-progress-bar" id="loading-progress-bar"></div></div>
+        </div>
+    </div>
+
     <!-- 모바일 사이드바 백드롭 -->
     <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar()"></div>
 
@@ -2187,9 +2774,16 @@
                 </button>
                 <div style="display: flex; justify-content: center; margin-top: 12px;">
                     <button class="btn" id="theme-toggle-btn" onclick="toggleTheme()" title="다크/라이트 모드 전환" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--text-secondary);">
-                        <span id="theme-icon" aria-hidden="true">🌙</span> 다크 모드
+                        <span id="theme-icon" aria-hidden="true">☀️</span> 라이트 모드로
                     </button>
                 </div>
+                <button class="sidebar-settings-btn" onclick="openInlineSettings()" title="설정">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="8" cy="8" r="2.5"/>
+                        <path d="M13.5 8a5.5 5.5 0 01-.3 1.7l1.3.8-.9 1.5-1.4-.5a5.5 5.5 0 01-1.5 1l.1 1.5h-1.6l.1-1.5a5.5 5.5 0 01-1.5-1l-1.4.5-.9-1.5 1.3-.8A5.5 5.5 0 016.5 8c0-.6.1-1.2.3-1.7l-1.3-.8.9-1.5 1.4.5a5.5 5.5 0 011.5-1L9.2 2h1.6l-.1 1.5a5.5 5.5 0 011.5 1l1.4-.5.9 1.5-1.3.8c.2.5.3 1.1.3 1.7z"/>
+                    </svg>
+                    설정
+                </button>
             </div>
         </aside>
 
@@ -2205,7 +2799,18 @@
                 </svg>
             </button>
             <h1>sonote</h1>
-            <span class="header-badge" id="auto-scroll" role="status" aria-live="polite">자동 스크롤 ON</span>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <button
+                    class="btn"
+                    id="btn-settings"
+                    onclick="openSettingsPanel()"
+                    title="설정 열기"
+                    style="padding:8px 12px;font-size:var(--text-xs);"
+                >
+                    설정
+                </button>
+                <span class="header-badge" id="auto-scroll" role="status" aria-live="polite">자동 스크롤 ON</span>
+            </div>
         </div>
 
         <!-- 과거 세션 조회 시 표시되는 배너 -->
@@ -2271,7 +2876,7 @@
                         <span class="live-dot"></span>
                         <span class="status-text">재연결 중</span>
                 </span>
-                <label class="ws-toggle-label" title="WebSocket 양방향 통신 사용">
+                <label class="ws-toggle-label" title="WebSocket 양방향 통신 사용" id="ws-toggle-label" style="display:none;">
                     <input type="checkbox" id="ws-toggle" onchange="switchProtocol(this.checked)">
                     <span class="ws-toggle-text">WS</span>
                 </label>
@@ -2283,8 +2888,8 @@
                         <span class="audio-bar"></span>
                     </span>
                 </button>
-                    <button class="btn" id="btn-pip" onclick="togglePip()" title="항상 위로 띄우기"><span aria-hidden="true">🪟</span> 미니 모드</button>
-                    <button class="btn" id="btn-shutdown" onclick="showShutdownModal()">저장 & 종료</button>
+                    <button class="btn" id="btn-pip" onclick="togglePip()" title="PiP 미니 뷰">PiP</button>
+                    <button class="btn" id="btn-save-session" onclick="saveAndNewSession()">저장</button>
                     <button class="btn" id="enroll-toggle" onclick="toggleEnrollPanel()" title="화자 등록">화자</button>
                 </div>
                 <div class="status-group status-group-device">
@@ -2326,16 +2931,106 @@
         </div>
 
         <div id="transcript" class="glass" aria-label="실시간 자막 영역">
-            <div class="empty-state" id="empty-state">
-                <span class="icon">◉</span>
-                <span>마이크 입력 대기 중...</span>
+            <div class="onboarding-card" id="empty-state">
+                <span class="onboarding-icon" aria-hidden="true">&#x1F399;</span>
+                <div class="onboarding-title">회의 전사 준비</div>
+                <div class="onboarding-desc">마이크를 선택하고 녹음을 시작하세요</div>
+                <button class="record-start-btn" id="record-start-btn" onclick="togglePause()" disabled>
+                    <span class="record-start-pulse"></span>
+                    <span class="record-start-label">녹음 시작</span>
+                </button>
             </div>
+        </div>
+        <!-- 타이핑 인디케이터 -->
+        <div class="typing-indicator" id="typing-indicator" aria-live="polite">
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+            <span style="margin-left:4px;">음성 인식 중...</span>
         </div>
         <!-- 스크린 리더용 집약 알림 영역 (5초 간격) -->
         <div id="sr-live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
     </main>
         </div><!-- /.main-content -->
     </div><!-- /.app-layout -->
+
+    <!-- Settings 인라인 슬라이드-오버 패널 -->
+    <div class="settings-overlay" id="settings-overlay" onclick="closeInlineSettings()"></div>
+    <div class="settings-slide-panel" id="settings-panel" role="dialog" aria-modal="true" aria-label="설정 패널">
+        <div class="settings-panel-header">
+            <span class="settings-panel-title">설정</span>
+            <button class="settings-panel-close" onclick="closeInlineSettings()" aria-label="설정 닫기">✕</button>
+        </div>
+        <div class="settings-panel-body">
+            <!-- 오디오 -->
+            <div class="sp-card">
+                <div class="sp-section-title">오디오</div>
+                <div class="sp-field">
+                    <label class="sp-field-label" for="sp-mic-select">마이크 장치</label>
+                    <select class="sp-field-select" id="sp-mic-select">
+                        <option value="">장치를 불러오는 중...</option>
+                    </select>
+                </div>
+            </div>
+            <!-- 녹음 옵션 -->
+            <div class="sp-card">
+                <div class="sp-section-title">녹음 옵션</div>
+                <div class="sp-toggle-row">
+                    <div>
+                        <div class="sp-toggle-label">화자 분리</div>
+                        <div class="sp-toggle-desc">발화자를 자동으로 구분합니다</div>
+                    </div>
+                    <div class="sp-toggle-switch" data-sp-key="diarize" onclick="toggleSpSwitch(this)">
+                        <div class="sp-toggle-knob"></div>
+                    </div>
+                </div>
+                <div class="sp-toggle-row">
+                    <div>
+                        <div class="sp-toggle-label">미디어 자동 음소거</div>
+                        <div class="sp-toggle-desc">녹음 시 시스템 오디오를 음소거합니다</div>
+                    </div>
+                    <div class="sp-toggle-switch" data-sp-key="auto_mute_media" onclick="toggleSpSwitch(this)">
+                        <div class="sp-toggle-knob"></div>
+                    </div>
+                </div>
+                <div class="sp-toggle-row">
+                    <div>
+                        <div class="sp-toggle-label">트레이 최소화</div>
+                        <div class="sp-toggle-desc">닫기 시 시스템 트레이로 최소화</div>
+                    </div>
+                    <div class="sp-toggle-switch" data-sp-key="minimize_to_tray" onclick="toggleSpSwitch(this)">
+                        <div class="sp-toggle-knob"></div>
+                    </div>
+                </div>
+            </div>
+            <!-- 후처리 -->
+            <div class="sp-card">
+                <div class="sp-section-title">후처리</div>
+                <div class="sp-field">
+                    <label class="sp-field-label" for="sp-engine-select">후처리 엔진</label>
+                    <select class="sp-field-select" id="sp-engine-select">
+                        <option value="auto">자동 (Auto)</option>
+                        <option value="codex">Codex</option>
+                        <option value="gemini">Gemini</option>
+                        <option value="ollama">Ollama</option>
+                    </select>
+                </div>
+            </div>
+            <!-- 알림 -->
+            <div class="sp-card">
+                <div class="sp-section-title">알림</div>
+                <div class="sp-field">
+                    <label class="sp-field-label" for="sp-discord-webhook">Discord Webhook URL</label>
+                    <input class="sp-field-input" id="sp-discord-webhook" type="url"
+                           placeholder="https://discord.com/api/webhooks/..."
+                           spellcheck="false" autocomplete="off" />
+                </div>
+            </div>
+            <!-- 저장 버튼 -->
+            <button class="sp-save-btn" id="sp-save-btn" onclick="saveInlineSettings()">저장</button>
+            <div class="sp-save-status" id="sp-save-status"></div>
+        </div>
+    </div>
 
     <!-- 커스텀 종료 확인 모달 -->
     <div id="shutdown-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="shutdown-modal-title" aria-describedby="shutdown-modal-desc" aria-hidden="true" inert>
@@ -2403,20 +3098,296 @@
             const isLight = currentTheme === "light" || (!currentTheme && window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
 
             if (isLight) {
-                btn.innerHTML = `<span id="theme-icon" aria-hidden="true">☀️</span> 라이트 모드`;
-                btn.setAttribute("aria-label", "현재 라이트 모드, 다크 모드로 전환");
+                btn.innerHTML = `<span id="theme-icon" aria-hidden="true">🌙</span> 다크 모드로`;
+                btn.setAttribute("aria-label", "다크 모드로 전환");
             } else {
-                btn.innerHTML = `<span id="theme-icon" aria-hidden="true">🌙</span> 다크 모드`;
-                btn.setAttribute("aria-label", "현재 다크 모드, 라이트 모드로 전환");
+                btn.innerHTML = `<span id="theme-icon" aria-hidden="true">☀️</span> 라이트 모드로`;
+                btn.setAttribute("aria-label", "라이트 모드로 전환");
             }
         }
         initTheme();
+
+        /* === 로딩 스플래시 상태 머신 ===
+         * 상태: state-loading (기본) | state-failed | state-retry
+         * Discord "Retrying in X seconds..." 패턴 구현
+         */
+        const SplashState = {
+            // 카운트다운 타이머 ID (재시도 중일 때만 유효)
+            _countdownTimer: null,
+            // 재연결 시도 횟수 (backoff 계산용)
+            _retryAttempt: 0,
+            // SSE 재연결 backoff 캡: 1→2→4→8→15→30초
+            _backoffSteps: [1000, 2000, 4000, 8000, 15000, 30000],
+
+            /** 스플래시가 아직 DOM에 있는지 확인 */
+            _splash() { return document.getElementById("loading-splash"); },
+
+            /** 상태 클래스 전환 헬퍼 */
+            _setState(state) {
+                const el = this._splash();
+                if (!el) return;
+                el.classList.remove("state-loading", "state-failed", "state-retry");
+                el.classList.add(state);
+            },
+
+            /** 로딩 중 상태 — 정상 부팅 진행 중 */
+            setLoading(msg) {
+                this._clearCountdown();
+                this._setState("state-loading");
+                const statusEl = document.getElementById("loading-status");
+                if (statusEl) statusEl.textContent = msg || "시작하는 중...";
+            },
+
+            /** 연결 실패 상태 */
+            setFailed(msg) {
+                this._clearCountdown();
+                this._setState("state-failed");
+                const statusEl = document.getElementById("loading-status");
+                if (statusEl) statusEl.textContent = msg || "연결에 실패했습니다";
+            },
+
+            /** 재시도 대기 상태 — 카운트다운 UI 표시 (Discord 패턴) */
+            setRetry(delaySec) {
+                this._clearCountdown();
+                this._setState("state-retry");
+                const countdownEl = document.getElementById("loading-retry-countdown");
+                let remaining = delaySec;
+                const tick = () => {
+                    if (!this._splash()) return; // 스플래시 제거됨
+                    if (countdownEl) {
+                        countdownEl.textContent = remaining > 0
+                            ? `${remaining}초 후 재시도합니다...`
+                            : "재연결 중...";
+                    }
+                    if (remaining > 0) {
+                        remaining--;
+                        this._countdownTimer = setTimeout(tick, 1000);
+                    }
+                };
+                tick();
+            },
+
+            /** 준비 완료 — 스플래시 숨김 */
+            setReady() {
+                this._clearCountdown();
+                const statusEl = document.getElementById("loading-status");
+                if (statusEl) statusEl.textContent = "준비 완료!";
+                const el = this._splash();
+                if (el) {
+                    setTimeout(() => el.classList.add("hidden"), 400);
+                    setTimeout(() => { try { el.remove(); } catch(e) {} }, 1200);
+                }
+            },
+
+            /** 카운트다운 타이머 정리 */
+            _clearCountdown() {
+                if (this._countdownTimer) {
+                    clearTimeout(this._countdownTimer);
+                    this._countdownTimer = null;
+                }
+                const countdownEl = document.getElementById("loading-retry-countdown");
+                if (countdownEl) countdownEl.textContent = "잠시 후 재시도합니다...";
+            },
+
+            /** SSE/WS 재연결 backoff 딜레이(ms) 반환 및 카운터 증가 */
+            nextBackoffMs() {
+                const steps = this._backoffSteps;
+                const idx = Math.min(this._retryAttempt, steps.length - 1);
+                this._retryAttempt++;
+                return steps[idx];
+            },
+
+            /** 연결 성공 시 backoff 카운터 리셋 */
+            resetBackoff() {
+                this._retryAttempt = 0;
+            },
+        };
+
+        /* === Lottie 애니메이션 초기화 ===
+         * @lottiefiles/lottie-player CDN 로드 성공 시 마이크 이모지 대신 표시.
+         * 로드 실패 시 CSS 스피너(loading-ring) + 이모지(loading-mic)로 fallback.
+         */
+        function initLottie() {
+            // CDN 로드 실패 플래그 확인
+            if (window.__lottieLoadFailed) return;
+
+            // lottie-player 커스텀 엘리먼트 등록 확인
+            if (!customElements.get("lottie-player")) {
+                // defer 로드 완료 대기 (최대 3초)
+                let waited = 0;
+                const check = setInterval(() => {
+                    waited += 200;
+                    if (customElements.get("lottie-player")) {
+                        clearInterval(check);
+                        _mountLottie();
+                    } else if (waited >= 3000) {
+                        clearInterval(check); // 타임아웃 — CSS fallback 유지
+                    }
+                }, 200);
+                return;
+            }
+            _mountLottie();
+        }
+
+        function _mountLottie() {
+            const container = document.getElementById("loading-lottie");
+            const micEl = document.getElementById("loading-mic");
+            const ringEl = document.getElementById("loading-ring");
+            if (!container) return;
+
+            try {
+                // lottie-player 엘리먼트 생성
+                const player = document.createElement("lottie-player");
+                // LottieFiles 공개 마이크/음파 애니메이션 (무료 CDN 에셋)
+                player.setAttribute(
+                    "src",
+                    "https://assets10.lottiefiles.com/packages/lf20_jcikwtux.json"
+                );
+                player.setAttribute("background", "transparent");
+                player.setAttribute("speed", "1");
+                player.setAttribute("loop", "");
+                player.setAttribute("autoplay", "");
+                player.style.width = "56px";
+                player.style.height = "56px";
+
+                // 로드 성공 시 CSS 스피너/이모지 숨기고 Lottie 표시
+                player.addEventListener("ready", () => {
+                    if (ringEl) ringEl.style.display = "none";
+                    if (micEl) micEl.style.display = "none";
+                    container.style.display = "block";
+                });
+
+                // Lottie 자체 로드 실패 시 fallback 유지 (아무것도 안 함)
+                player.addEventListener("error", () => {
+                    container.style.display = "none";
+                });
+
+                container.appendChild(player);
+            } catch (e) {
+                // DOM 조작 실패 — CSS fallback 유지
+                container.style.display = "none";
+            }
+        }
+
+        // DOM 준비 후 Lottie 초기화 시도
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", initLottie);
+        } else {
+            initLottie();
+        }
 
         /* === PDF 다운로드 === */
         function downloadSessionPdf() {
             const sessionId = AppState.currentSessionId;
             if (!sessionId) return;
             window.open(`/api/sessions/${sessionId}/export?format=pdf`, "_blank");
+        }
+
+        async function openSettingsPanel() {
+            openInlineSettings();
+        }
+
+        /* === Settings 인라인 슬라이드-오버 === */
+        const _spState = {
+            microphone: "",
+            diarize: true,
+            auto_mute_media: false,
+            minimize_to_tray: false,
+            polish_engine: "auto",
+            discord_webhook_url: "",
+        };
+
+        function openInlineSettings() {
+            document.getElementById("settings-overlay").classList.add("open");
+            document.getElementById("settings-panel").classList.add("open");
+            _loadInlineSettingsData();
+        }
+
+        function closeInlineSettings() {
+            document.getElementById("settings-overlay").classList.remove("open");
+            document.getElementById("settings-panel").classList.remove("open");
+        }
+
+        function toggleSpSwitch(el) {
+            const key = el.dataset.spKey;
+            _spState[key] = !_spState[key];
+            el.classList.toggle("on", _spState[key]);
+        }
+
+        async function _loadInlineSettingsData() {
+            // 마이크 장치 로드
+            try {
+                const devRes = await fetch("/api/audio-devices");
+                const devices = await devRes.json();
+                const micSel = document.getElementById("sp-mic-select");
+                micSel.innerHTML = "";
+                if (!devices || devices.length === 0) {
+                    const opt = document.createElement("option");
+                    opt.value = "";
+                    opt.textContent = "사용 가능한 장치 없음";
+                    micSel.appendChild(opt);
+                } else {
+                    for (const d of devices) {
+                        const opt = document.createElement("option");
+                        opt.value = d.id != null ? d.id : d.name;
+                        opt.textContent = d.name;
+                        micSel.appendChild(opt);
+                    }
+                }
+            } catch (e) {
+                document.getElementById("sp-mic-select").innerHTML = '<option value="">장치 로드 실패</option>';
+            }
+
+            // 설정 로드
+            try {
+                const res = await fetch("/api/settings");
+                const data = await res.json();
+                if (data) {
+                    for (const k of Object.keys(_spState)) {
+                        if (data[k] !== undefined) _spState[k] = data[k];
+                    }
+                }
+            } catch (e) { /* 무시 */ }
+
+            // UI 동기화
+            if (_spState.microphone) {
+                document.getElementById("sp-mic-select").value = _spState.microphone;
+            }
+            document.getElementById("sp-engine-select").value = _spState.polish_engine || "auto";
+            document.getElementById("sp-discord-webhook").value = _spState.discord_webhook_url || "";
+            document.querySelectorAll(".sp-toggle-switch").forEach(function(sw) {
+                sw.classList.toggle("on", !!_spState[sw.dataset.spKey]);
+            });
+        }
+
+        async function saveInlineSettings() {
+            _spState.microphone = document.getElementById("sp-mic-select").value;
+            _spState.polish_engine = document.getElementById("sp-engine-select").value;
+            _spState.discord_webhook_url = document.getElementById("sp-discord-webhook").value.trim();
+
+            const btn = document.getElementById("sp-save-btn");
+            btn.disabled = true;
+
+            try {
+                const res = await fetch("/api/settings", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(_spState),
+                });
+                if (!res.ok) throw new Error("저장 실패");
+                _showSpStatus("설정이 저장되었습니다", false);
+            } catch (e) {
+                _showSpStatus("저장에 실패했습니다", true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function _showSpStatus(msg, isError) {
+            const el = document.getElementById("sp-save-status");
+            el.textContent = msg;
+            el.className = "sp-save-status show " + (isError ? "error" : "ok");
+            setTimeout(() => { el.className = "sp-save-status"; }, 2500);
         }
 
         /* === 스크린 리더 집약 알림 (5초 간격) === */
@@ -2441,7 +3412,30 @@
                 const timeStr = session.time.replace(/(\d{2})(\d{2})(\d{2})/, "$1:$2:$3");
                 return new Date(session.date + "T" + timeStr);
             }
+            if (session.id) {
+                const m = String(session.id).match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})(\d{2})$/);
+                if (m) {
+                    return new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`);
+                }
+            }
             return new Date(session.started_at || session.created_at || Date.now());
+        }
+
+        function formatDefaultSessionTitle(session) {
+            const currentTitle = String(session?.title || "").trim();
+            if (currentTitle) return currentTitle;
+
+            const date = parseSessionDate(session || {});
+            if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+                return "세션";
+            }
+
+            const yy = String(date.getFullYear()).slice(-2);
+            const mm = String(date.getMonth() + 1).padStart(2, "0");
+            const dd = String(date.getDate()).padStart(2, "0");
+            const hh = String(date.getHours()).padStart(2, "0");
+            const min = String(date.getMinutes()).padStart(2, "0");
+            return `${yy}-${mm}-${dd} ${hh}:${min}`;
         }
 
         const transcriptEl = document.getElementById("transcript");
@@ -2534,6 +3528,7 @@
                 }
 
                 const queryStr = params.toString();
+                const hasFilter = Boolean(queryStr);
                 const url = "/api/sessions" + (queryStr ? "?" + queryStr : "");
                 const res = await fetch(url, { cache: "no-store" });
                 if (!res.ok) {
@@ -2542,8 +3537,18 @@
                     throw new Error("세션 목록 로드 실패");
                 }
                 const sessions = await res.json();
-                AppState.sessions = Array.isArray(sessions) ? sessions : [];
+                const baseSessions = Array.isArray(sessions) ? sessions : [];
+                AppState.sessions = baseSessions.map((session, index) => ({
+                    ...session,
+                    title: formatDefaultSessionTitle(session),
+                    // 필터링이 없는 기본 목록에서는 최신 세션을 라이브 항목으로 취급
+                    is_live: Boolean(session?.is_live) || (!hasFilter && index === 0),
+                }));
                 renderSessionList(AppState.sessions);
+                if (AppState.currentView === "live") {
+                    historyBanner.classList.remove("visible");
+                    returnLiveBtn.classList.remove("visible");
+                }
             } catch (e) {
                 // API 미구현이거나 서버 미연결 시 조용히 무시
                 console.debug("[사이드바] 세션 목록 로드 실패:", e.message);
@@ -2638,6 +3643,7 @@
             // 시작 시간 포맷
             const date = parseSessionDate(session);
             const timeStr = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+            const titleText = String(session.title || "").trim() || timeStr;
 
             // 메타 정보
             const segCount = session.segment_count || 0;
@@ -2650,7 +3656,7 @@
                 info.className = "session-item-info";
                 const title = document.createElement("div");
                 title.className = "session-item-title";
-                title.textContent = timeStr + " ";
+                title.textContent = titleText + " ";
                 const liveLabel = document.createElement("span");
                 liveLabel.className = "session-live-label";
                 liveLabel.textContent = "\uC2E4\uC2DC\uAC04";
@@ -2683,7 +3689,7 @@
                 hInfo.className = "session-item-info";
                 const hTitle = document.createElement("div");
                 hTitle.className = "session-item-title";
-                hTitle.textContent = timeStr;
+                hTitle.textContent = titleText;
                 const hMeta = document.createElement("div");
                 hMeta.className = "session-item-meta";
                 const hSeg = document.createElement("span");
@@ -2765,7 +3771,7 @@
             transcriptEl.innerHTML = "";
 
             // 과거 세그먼트 렌더링
-            const segments = data.segments || data.history || data || [];
+            const segments = data.alignment || data.history || [];
             if (Array.isArray(segments) && segments.length > 0) {
                 // globalSegmentIndex를 리셋하지 않음 (충돌 방지)
                 for (const seg of segments) {
@@ -2803,7 +3809,8 @@
 
             // 컨트롤 비활성화 (과거 세션에서는 녹음 관련 버튼 숨김)
             pauseBtn.style.display = "none";
-            document.getElementById("btn-shutdown").style.display = "none";
+            const saveBtn = document.getElementById("btn-save-session");
+            if (saveBtn) saveBtn.style.display = "none";
             document.getElementById("btn-pip").style.display = "none";
 
             // 모바일에서 사이드바 닫기
@@ -2814,6 +3821,7 @@
 
         /* === 실시간 세션으로 복귀 === */
         function returnToLiveSession() {
+            // 실시간 복귀 시 뷰 상태를 먼저 확정
             AppState.currentView = "live";
             AppState.currentSessionId = null;
 
@@ -2827,14 +3835,15 @@
 
             // 컨트롤 복원
             pauseBtn.style.display = "";
-            document.getElementById("btn-shutdown").style.display = "";
+            const saveBtn = document.getElementById("btn-save-session");
+            if (saveBtn) saveBtn.style.display = "";
             document.getElementById("btn-pip").style.display = "";
 
             // 가상 스크롤 리셋
             VirtualScroll.reset();
 
-            // 메인 전사 영역 비우기 + 빈 상태 복원
-            transcriptEl.innerHTML = '<div class="empty-state" id="empty-state"><span class="icon">\u25C9</span><span>\uB9C8\uC774\uD06C \uC785\uB825 \uB300\uAE30 \uC911...</span></div>';
+            // 메인 전사 영역 비우기 + 온보딩 카드 복원
+            transcriptEl.innerHTML = '<div class="onboarding-card" id="empty-state"><span class="onboarding-icon" aria-hidden="true">&#x1F399;</span><div class="onboarding-title">회의 전사 준비</div><div class="onboarding-desc">마이크를 선택하고 녹음을 시작하세요</div><div class="onboarding-steps"><div class="onboarding-step"><span class="onboarding-step-num">1</span><span>상단에서 마이크 장치를 선택합니다</span></div><div class="onboarding-step"><span class="onboarding-step-num">2</span><span>서버가 준비되면 자동으로 녹음이 시작됩니다</span></div><div class="onboarding-step"><span class="onboarding-step-num">3</span><span>실시간 전사 결과가 여기에 표시됩니다</span></div></div></div>';
 
             // 히스토리 재로드 + SSE 재연결
             globalSegmentIndex = 0;
@@ -2861,7 +3870,7 @@
 
                 // 가상 스크롤 리셋 + 메인 영역 리셋
                 VirtualScroll.reset();
-                transcriptEl.innerHTML = '<div class="empty-state" id="empty-state"><span class="icon">\u25C9</span><span>\uC0C8 \uC138\uC158 \uC2DC\uC791 \uB300\uAE30 \uC911...</span></div>';
+                transcriptEl.innerHTML = '<div class="onboarding-card" id="empty-state"><span class="onboarding-icon" aria-hidden="true">&#x1F399;</span><div class="onboarding-title">새 세션 시작</div><div class="onboarding-desc">녹음이 시작되면 전사 결과가 여기에 표시됩니다</div></div>';
                 globalSegmentIndex = 0;
 
                 // 실시간 뷰로 전환
@@ -2870,8 +3879,11 @@
                 historyBanner.classList.remove("visible");
                 returnLiveBtn.classList.remove("visible");
 
-                // 세션 목록 갱신
+                // 세션 목록 갱신 (즉시 + 지연 재시도 — 캡처 루프의 세션 회전 처리 대기)
                 await loadSessionList();
+                for (const delay of [2000, 5000, 8000]) {
+                    setTimeout(() => loadSessionList(), delay);
+                }
 
                 // SSE 재연결
                 connectStream();
@@ -2910,6 +3922,8 @@
             fill.style.width = pct + "%";
 
             const phaseLabels = {
+                stt: "STT 교정",
+                summary: "요약 생성",
                 stt_correct: "STT 교정",
                 summarize: "요약 생성",
                 saving: "저장 중",
@@ -2948,9 +3962,19 @@
         let pipWindow = null;
 
         async function togglePip() {
-            // Document PIP API 지원 여부 확인
+            // Document PIP API 지원 여부 확인 (pywebview/WebView2에서는 미지원)
             if (!("documentPictureInPicture" in window)) {
-                alert("현재 사용 중인 브라우저는 미니 모드(Document PIP)를 지원하지 않습니다. Chrome 최신 버전을 사용해 주세요.");
+                // pywebview JS API가 있으면 pywebview.api.open_viewer()로 대체 시도
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.open_viewer();
+                    return;
+                }
+                const btnPip = document.getElementById("btn-pip");
+                if (btnPip) {
+                    btnPip.disabled = true;
+                    btnPip.style.opacity = "0.4";
+                    btnPip.title = "데스크톱 앱에서는 PiP를 지원하지 않습니다";
+                }
                 return;
             }
 
@@ -2971,7 +3995,7 @@
                 });
 
                 btnPip.classList.add("active");
-                btnPip.innerHTML = '<span aria-hidden="true">🪟</span> 원래대로';
+                btnPip.textContent = "닫기";
                 btnPip.style.color = "var(--accent)";
 
                 // PIP 창 제목 설정
@@ -3006,53 +4030,18 @@
                 pipWindow.document.body.style.display = "flex";
                 pipWindow.document.body.style.flexDirection = "column";
 
-                // --- 세련된 PiP 전용 헤더 생성 ---
+                // --- Apple 미니멀 PiP 헤더 ---
                 const pipHeader = pipWindow.document.createElement("div");
-                pipHeader.style.cssText = `
-                    display: flex;
-                    align-items: center;
-                    justify-content: space-between;
-                    padding: 10px 14px;
-                    background: oklch(var(--overlay-base) / 0.02);
-                    border-bottom: 1px solid var(--border-subtle);
-                    flex-shrink: 0;
-                    -webkit-app-region: drag; /* 드래그 가능 영역 (지원 시) */
-                `;
+                pipHeader.className = "pip-header";
 
-                // 좌측: Live 배지
-                const liveBadge = pipWindow.document.createElement("div");
-                liveBadge.style.cssText = `
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
-                    font-size: 10px;
-                    font-weight: 800;
-                    color: var(--danger);
-                    text-transform: uppercase;
-                    letter-spacing: 0.05em;
-                `;
-                liveBadge.innerHTML = `<span style="width:6px; height:6px; background:var(--danger); border-radius:50%; box-shadow:0 0 8px var(--danger);"></span> LIVE`;
-                
-                // 중앙: 드래그 핸들 (세련된 형태)
-                const handle = pipWindow.document.createElement("div");
-                handle.style.cssText = `
-                    width: 32px;
-                    height: 4px;
-                    background: oklch(var(--overlay-base) / 0.1);
-                    border-radius: 2px;
-                `;
+                const liveDot = pipWindow.document.createElement("div");
+                liveDot.className = "pip-live-dot";
 
-                // 우측: 시간 표시 (메인 창과 동기화됨)
                 const pipTimer = pipWindow.document.createElement("div");
                 pipTimer.id = "pip-timer";
-                pipTimer.style.cssText = `
-                    font-family: var(--font-mono);
-                    font-size: 11px;
-                    color: var(--text-tertiary);
-                `;
                 pipTimer.textContent = document.getElementById("elapsed").textContent;
 
-                pipHeader.append(liveBadge, handle, pipTimer);
+                pipHeader.append(liveDot, pipTimer);
                 pipWindow.document.body.appendChild(pipHeader);
 
                 // --- 내용 영역 ---
@@ -3123,7 +4112,7 @@
                         ph.parentNode.replaceChild(transcriptContainer, ph);
                     }
                     btnPip.classList.remove("active");
-                    btnPip.innerHTML = '<span aria-hidden="true">🪟</span> 미니 모드';
+                    btnPip.textContent = "PiP";
                     btnPip.style.color = "";
                     pipWindow = null;
                 });
@@ -3231,14 +4220,18 @@
         function updatePauseUI() {
             const indicator = document.getElementById("mic-indicator");
             const btnText = document.getElementById("btn-pause-text");
+            const emptyState = document.getElementById("empty-state");
             if (isPaused) {
-                if (btnText) btnText.textContent = "⏸ 일시정지";
+                if (btnText) btnText.textContent = "▶ 녹음 시작";
                 pauseBtn.classList.add("paused");
                 if (indicator) indicator.style.display = "none";
             } else {
-                if (btnText) btnText.textContent = "● 녹음 중";
+                if (btnText) btnText.textContent = "⏸ 녹음 중지";
                 pauseBtn.classList.remove("paused");
-                if (indicator) indicator.style.display = "inline-flex";
+                // 인디케이터는 전사 이벤트 시에만 표시 (showTypingIndicator에서 제어)
+                if (indicator) indicator.style.display = "none";
+                // 녹음 시작 시 온보딩 카드 숨기기
+                if (emptyState) emptyState.style.display = "none";
             }
         }
 
@@ -3337,6 +4330,37 @@
             openModalAccessible(document.getElementById("shutdown-modal"));
         }
 
+        async function saveAndNewSession() {
+            // 현재 세션 녹음 정지 + 후처리 트리거 (앱은 유지)
+            const btn = document.getElementById("btn-save-session");
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            btn.textContent = "저장 중...";
+            btn.style.opacity = "0.5";
+
+            try {
+                // 녹음 일시정지
+                if (!isPaused) {
+                    await fetch("/toggle-pause", { method: "POST" });
+                    isPaused = true;
+                    updatePauseUI();
+                }
+
+                // 세션 마무리 + 후처리 트리거 (백그라운드)
+                const res = await fetch("/api/sessions/new", { method: "POST" });
+                if (res.ok) {
+                    if (sessionStatusEl) sessionStatusEl.textContent = "후처리 시작됨";
+                    loadSessionList();
+                }
+            } catch (e) {
+                console.error("[세션 저장] 실패:", e);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "저장";
+                btn.style.opacity = "1";
+            }
+        }
+
         function closeShutdownModal() {
             closeModalAccessible(document.getElementById("shutdown-modal"));
         }
@@ -3347,10 +4371,12 @@
                 const res = await fetch("/shutdown", { method: "POST" });
                 if (res.ok) {
                     // 종료 버튼
-                    const btn = document.getElementById("btn-shutdown");
-                    btn.textContent = "종료 중...";
-                    btn.disabled = true;
-                    btn.style.opacity = "0.5";
+                    const btn = document.getElementById("btn-save-session");
+                    if (btn) {
+                        btn.textContent = "종료 중...";
+                        btn.disabled = true;
+                        btn.style.opacity = "0.5";
+                    }
 
                     // 녹음 상태 즉시 해제
                     const btnText = document.getElementById("btn-pause-text");
@@ -3360,6 +4386,12 @@
                     const indicator = document.getElementById("mic-indicator");
                     if (indicator) indicator.style.display = "none";
 
+                    // SSE/WS 재연결 중단
+                    _shutdownRequested = true;
+                    if (source) source.close();
+                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                    if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+
                     // 연결 상태 즉시 변경
                     setConnectionState(false);
                     connectionEl.classList.remove("reconnecting");
@@ -3368,6 +4400,9 @@
 
                     // 세션 상태
                     if (sessionStatusEl) sessionStatusEl.textContent = "저장 중...";
+
+                    // 2초 후 탭 자동 닫기 (앱 모드에서만 동작)
+                    setTimeout(() => { try { window.close(); } catch(e) {} }, 2000);
                 }
             } catch (e) { /* 무시 */ }
         }
@@ -3379,10 +4414,38 @@
             sessionStatusEl.textContent = message;
             pauseBtn.disabled = !ready;
             pauseBtn.style.opacity = ready ? "1" : "0.5";
-            if (!ready && emptyState) {
-                const label = emptyState.querySelector("span:last-child");
-                if (label) {
-                    label.textContent = message;
+
+            // 녹음 시작 버튼 활성화
+            const recBtn = document.getElementById("record-start-btn");
+            if (recBtn) {
+                recBtn.disabled = !ready;
+            }
+
+            // 로딩 스플래시 제어 — SplashState 상태 머신 사용
+            if (document.getElementById("loading-splash")) {
+                if (ready) {
+                    SplashState.setReady();
+                } else {
+                    SplashState.setLoading(message);
+                }
+            }
+
+            // 녹음 상태 텍스트 업데이트 (대기 중 / 준비 중 / 녹음 중 / 일시정지)
+            const btnText = document.getElementById("btn-pause-text");
+            if (btnText && !isPaused) {
+                if (!ready) {
+                    const phase = startup?.phase || "booting";
+                    btnText.textContent = phase === "booting" ? "대기 중" : "준비 중";
+                } else {
+                    btnText.textContent = "● 녹음 중";
+                }
+            }
+
+            if (!ready) {
+                const es = document.getElementById("empty-state");
+                if (es) {
+                    const descEl = es.querySelector(".onboarding-desc");
+                    if (descEl) descEl.textContent = message;
                 }
             }
         }
@@ -3405,19 +4468,20 @@
         }
 
         function resetPostprocessUI(disconnected = false) {
-            const shutdownBtn = document.getElementById("btn-shutdown");
+            const saveBtn = document.getElementById("btn-save-session");
             const ppBar = document.getElementById("postprocess-bar");
+            if (!saveBtn || !ppBar) return;
             const fill = ppBar.querySelector(".fill");
 
             ppBar.style.display = "none";
             fill.style.width = "0%";
-            shutdownBtn.style.color = "";
-            shutdownBtn.style.borderColor = "";
+            saveBtn.style.color = "";
+            saveBtn.style.borderColor = "";
 
             if (disconnected) {
-                shutdownBtn.textContent = "세션 종료됨";
-                shutdownBtn.disabled = true;
-                shutdownBtn.style.opacity = "0.5";
+                saveBtn.textContent = "세션 종료됨";
+                saveBtn.disabled = true;
+                saveBtn.style.opacity = "0.5";
                 if (deviceSelectEl) {
                     deviceSelectEl.disabled = true;
                 }
@@ -3427,9 +4491,9 @@
                 return;
             }
 
-            shutdownBtn.textContent = "저장 & 종료";
-            shutdownBtn.disabled = false;
-            shutdownBtn.style.opacity = "1";
+            saveBtn.textContent = "저장";
+            saveBtn.disabled = false;
+            saveBtn.style.opacity = "1";
         }
 
         function toSpeakerClass(speaker) {
@@ -3778,6 +4842,11 @@
             segSpan.textContent = nextText;
             text.appendChild(segSpan);
 
+            // 신뢰도 낮은 세그먼트 어둡게 표시 (confidence < 0.5)
+            if (item.confidence != null && item.confidence < 0.5) {
+                line.classList.add("low-confidence");
+            }
+
             line.append(ts, speaker, text);
 
             if (VirtualScroll.enabled) {
@@ -3918,6 +4987,7 @@
 
         let reconnectAttempts = 0;
         let reconnectTimer = null;
+        let _shutdownRequested = false;
         const MAX_RECONNECT_DELAY = 30000; // 30초
         const DISCONNECTED_THRESHOLD = 5;  // 이 횟수 이상 실패 시 "연결 끊김" 상태
 
@@ -3953,11 +5023,13 @@
                     const msgType = msg.type || "";
 
                     if (msgType === "transcript") {
+                        hideTypingIndicator();
                         appendTranscript({
                             speaker: msg.speaker,
                             text: msg.text,
                             ts: msg.ts,
                         });
+                        showTypingIndicator();
                     } else if (msgType === "correction") {
                         const corrections = msg.corrections || [];
                         for (const c of corrections) {
@@ -4081,16 +5153,25 @@
                 }
                 setConnectionState("connected");
                 reconnectAttempts = 0;
+                // 스플래시 재시도 상태에서 로딩 중으로 복귀
+                if (document.getElementById("loading-splash")) {
+                    SplashState.setLoading("서버 연결됨, 로딩 중...");
+                }
+                SplashState.resetBackoff();
             };
 
             source.onmessage = (event) => {
                 try {
+                    hideTypingIndicator();
                     appendTranscript(JSON.parse(event.data));
+                    showTypingIndicator();
                 } catch (e) { /* 파싱 오류 무시 */ }
             };
 
             source.onerror = () => {
                 source.close();
+                // 종료 요청 후에는 재연결하지 않음
+                if (_shutdownRequested) return;
                 // 과거 세션 조회 중이면 재연결하지 않음
                 if (AppState.currentView === "history") return;
 
@@ -4098,14 +5179,25 @@
                 if (reconnectAttempts >= DISCONNECTED_THRESHOLD) {
                     setConnectionState("disconnected");
                     resetPostprocessUI(true);
+                    // 스플래시가 아직 표시 중이면 실패 상태로 전환
+                    if (document.getElementById("loading-splash")) {
+                        SplashState.setFailed("서버 연결에 실패했습니다");
+                    }
                 } else {
                     setConnectionState("reconnecting");
                 }
 
-                // 지수 백오프: 1s, 2s, 4s, 8s, 16s, max 30s
+                // 지수 백오프: 1s, 2s, 4s, 8s, 15s, max 30s (SplashState backoff 테이블 사용)
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
                 reconnectAttempts++;
                 console.log(`[SSE] 재연결 시도 ${reconnectAttempts} (${delay/1000}초 후)`);
+
+                // 스플래시가 아직 표시 중이면 카운트다운 UI 표시
+                if (document.getElementById("loading-splash") &&
+                    reconnectAttempts < DISCONNECTED_THRESHOLD) {
+                    SplashState.setRetry(Math.round(delay / 1000));
+                }
+
                 reconnectTimer = setTimeout(connectStream, delay);
             };
 
@@ -4202,30 +5294,46 @@
                     updatePauseUI();
                 }
 
+                // 음성 감지 인디케이터 (서버 VAD 기반)
+                const micInd = document.getElementById("mic-indicator");
+                if (micInd && !isPaused) {
+                    micInd.style.display = data.voice_active ? "inline-flex" : "none";
+                }
+
                 // 후처리 상태
-                const shutdownBtn = document.getElementById("btn-shutdown");
+                const saveBtn = document.getElementById("btn-save-session");
                 const ppBar = document.getElementById("postprocess-bar");
                 if (data.postprocess) {
                     const pp = data.postprocess;
+                    const progress = Number(pp.progress) || 0;
+                    const phase = String(pp.phase || "");
                     ppBar.style.display = "block";
-                    ppBar.querySelector(".fill").style.width = pp.progress + "%";
-                    shutdownBtn.disabled = true;
-                    shutdownBtn.style.opacity = "0.5";
+                    ppBar.querySelector(".fill").style.width = progress + "%";
+                    if (saveBtn) {
+                        saveBtn.disabled = true;
+                        saveBtn.style.opacity = "0.5";
+                    }
                     const labels = {
                         saving: "저장 중...",
-                        stt: `STT 교정 ${pp.progress.toFixed(0)}%`,
-                        summary: `요약 생성 ${pp.progress.toFixed(0)}%`,
+                        stt: `STT 교정 ${progress.toFixed(0)}%`,
+                        stt_correct: `STT 교정 ${progress.toFixed(0)}%`,
+                        summary: `요약 생성 ${progress.toFixed(0)}%`,
+                        summarize: `요약 생성 ${progress.toFixed(0)}%`,
                         done: "후처리 완료",
                     };
-                    shutdownBtn.textContent = labels[pp.phase] || pp.phase;
-                    if (pp.phase === "done") {
-                        shutdownBtn.style.color = "var(--ok)";
-                        shutdownBtn.style.borderColor = "color-mix(in oklch, var(--ok) 40%, transparent)";
-                        shutdownBtn.style.opacity = "1";
+                    const statusText = labels[phase] || `${phase} ${progress.toFixed(0)}%`;
+                    if (saveBtn) saveBtn.textContent = statusText;
+                    if (sessionStatusEl) sessionStatusEl.textContent = statusText;
+                    if (phase === "done") {
+                        if (saveBtn) {
+                            saveBtn.style.color = "var(--ok)";
+                            saveBtn.style.borderColor = "color-mix(in oklch, var(--ok) 40%, transparent)";
+                            saveBtn.style.opacity = "1";
+                        }
                         ppBar.querySelector(".fill").style.width = "100%";
                     }
                     // 사이드바 실시간 세션 항목에 진행 표시
-                    updateSessionProgress(pp);
+                    updateSessionProgress({ phase, progress });
                 } else {
                     resetPostprocessUI(false);
                     updateSessionProgress(null);
@@ -4237,6 +5345,10 @@
                     setConnectionState("disconnected");
                     resetPostprocessUI(true);
                     setStartupState({ ready: false, message: "세션 종료됨" });
+                    // 스플래시가 아직 표시 중이면 실패 상태로 전환
+                    if (document.getElementById("loading-splash")) {
+                        SplashState.setFailed("서버 응답 없음");
+                    }
                 }
             }
         }
@@ -4456,7 +5568,7 @@
             if (!sessionId) return;
 
             try {
-                const res = await fetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+                const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
                 if (!res.ok) throw new Error("세션 삭제 실패");
 
                 // 현재 보고 있는 세션이 삭제된 경우 실시간으로 복귀
@@ -5194,6 +6306,28 @@
                 } catch (e) { /* 파싱 실패 무시 */ }
                 loadSessionList();
             });
+        }
+
+        /* === devMode: WS/SSE 토글 표시 제어 === */
+        (function initDevMode() {
+            const wsLabel = document.getElementById("ws-toggle-label");
+            if (wsLabel && localStorage.getItem("devMode") === "true") {
+                wsLabel.style.display = "";
+            }
+        })();
+
+        /* === 타이핑 인디케이터 제어 === */
+        let _typingTimer = null;
+        function showTypingIndicator() {
+            const el = document.getElementById("typing-indicator");
+            if (el) el.classList.add("active");
+            clearTimeout(_typingTimer);
+            _typingTimer = setTimeout(hideTypingIndicator, 5000);
+        }
+        function hideTypingIndicator() {
+            const el = document.getElementById("typing-indicator");
+            if (el) el.classList.remove("active");
+            clearTimeout(_typingTimer);
         }
 
         loadKeywords();

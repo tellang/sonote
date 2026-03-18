@@ -106,6 +106,10 @@ class MeetingWriter:
         self._raw_file.write(f"[{timestamp}] [{normalized_speaker}] {text}\n")
         self._raw_file.flush()
 
+        # alignment JSONL에도 기록 (세션 로드 시 구조화된 세그먼트로 사용)
+        self._alignment_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._alignment_file.flush()
+
     def write_profile_review(self, payload: dict[str, Any]) -> Path:
         self._profile_review_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),

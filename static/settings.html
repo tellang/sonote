@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="ko" data-theme="dark">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sonote — 설정</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='64' height='64' viewBox='0 0 64 64' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cdefs%3E%3ClinearGradient id='bg_grad' x1='0' y1='0' x2='64' y2='64' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0%25' stop-color='%235865F2'/%3E%3Cstop offset='100%25' stop-color='%237B68EE'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23bg_grad)'/%3E%3Cpath d='M32 14C27.5817 14 24 17.5817 24 22V30C24 34.4183 27.5817 38 32 38C36.4183 38 40 34.4183 40 30V22C40 17.5817 36.4183 14 32 14Z' fill='white'/%3E%3Cpath d='M46 28V30C46 37.1797 40.1797 43 33 43.92V48H39V51H25V48H31V43.92C23.8203 43 18 37.1797 18 30V28H21V30C21 36.0751 25.9249 41 32 41C38.0751 41 43 36.0751 43 30V28H46Z' fill='white'/%3E%3C/svg%3E">
+    <style>
+        :root, :root[data-theme="dark"] {
+            --surface-base:     oklch(0.13 0.01 270);
+            --surface-1:        oklch(0.17 0.012 270);
+            --surface-2:        oklch(0.21 0.014 270);
+            --surface-3:        oklch(0.25 0.016 270);
+
+            --text-primary:     oklch(0.93 0.005 270);
+            --text-secondary:   oklch(0.65 0.01 270);
+            --text-tertiary:    oklch(0.58 0.01 270);
+            --text-on-solid:    oklch(0.98 0.005 270);
+
+            --accent:           oklch(0.7 0.15 200);
+            --accent-dim:       oklch(0.7 0.15 200 / 0.15);
+            --accent-mid:       oklch(0.7 0.15 200 / 0.35);
+            --ok:               oklch(0.70 0.15 145);
+            --warn:             oklch(0.75 0.14 75);
+            --danger:           oklch(0.65 0.20 25);
+
+            --border:           oklch(0.30 0.01 270 / 0.5);
+            --border-subtle:    oklch(0.30 0.01 270 / 0.25);
+
+            --glass-bg:         oklch(0.15 0.01 270 / 0.65);
+            --input-bg:         oklch(0.15 0.01 270 / 0.6);
+            --overlay:          oklch(0.10 0.01 270 / 0.5);
+        }
+
+        :root[data-theme="light"] {
+            --surface-base:     oklch(0.96 0.005 270);
+            --surface-1:        oklch(0.93 0.01 270);
+            --surface-2:        oklch(0.90 0.015 270);
+            --surface-3:        oklch(0.87 0.02 270);
+
+            --text-primary:     oklch(0.20 0.01 270);
+            --text-secondary:   oklch(0.40 0.01 270);
+            --text-tertiary:    oklch(0.50 0.01 270);
+            --text-on-solid:    oklch(0.15 0.01 270);
+
+            --accent:           oklch(0.55 0.16 200);
+            --accent-dim:       oklch(0.55 0.16 200 / 0.12);
+            --accent-mid:       oklch(0.55 0.16 200 / 0.30);
+            --ok:               oklch(0.45 0.15 145);
+            --warn:             oklch(0.55 0.14 75);
+            --danger:           oklch(0.50 0.20 25);
+
+            --border:           oklch(0.80 0.01 270 / 0.6);
+            --border-subtle:    oklch(0.80 0.01 270 / 0.3);
+
+            --glass-bg:         oklch(1 0 0 / 0.55);
+            --input-bg:         oklch(1 0 0 / 0.6);
+            --overlay:          oklch(0.95 0.005 270 / 0.4);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: var(--surface-base);
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            display: flex;
+            justify-content: center;
+            padding: 24px 16px;
+            min-height: 100vh;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--border) transparent;
+        }
+        body::-webkit-scrollbar { width: 6px; }
+        body::-webkit-scrollbar-track { background: transparent; }
+        body::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        .settings-panel {
+            width: 100%;
+            max-width: 360px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        /* 헤더 */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .header h1 {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            color: var(--text-primary);
+        }
+        .theme-toggle-btn {
+            width: 36px; height: 36px;
+            border: 1px solid var(--border);
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: 10px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: all 0.2s ease;
+            color: var(--text-secondary);
+        }
+        .theme-toggle-btn:hover {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+        }
+
+        /* 카드 (Glassmorphism) */
+        .card {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .section-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 12px;
+        }
+
+        /* Select 드롭다운 */
+        .field { margin-bottom: 12px; }
+        .field:last-child { margin-bottom: 0; }
+        .field-label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        .field-select {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: inherit;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            cursor: pointer;
+            transition: border-color 0.15s;
+        }
+        .field-select:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-dim);
+        }
+        .field-select option {
+            background: var(--surface-1);
+            color: var(--text-primary);
+        }
+
+        /* 텍스트 입력 */
+        .field-input {
+            width: 100%;
+            padding: 10px 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: inherit;
+            transition: border-color 0.15s;
+        }
+        .field-input::placeholder { color: var(--text-tertiary); }
+        .field-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-dim);
+        }
+
+        /* 토글 행 */
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 0;
+        }
+        .toggle-row + .toggle-row {
+            border-top: 1px solid var(--border-subtle);
+        }
+        .toggle-label {
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+        .toggle-desc {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            margin-top: 1px;
+        }
+
+        /* 토글 스위치 */
+        .toggle-switch {
+            position: relative;
+            width: 42px; height: 24px;
+            background: var(--surface-3);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.25s ease;
+            flex-shrink: 0;
+            margin-left: 12px;
+        }
+        .toggle-switch.on {
+            background: var(--accent-mid);
+        }
+        .toggle-knob {
+            position: absolute;
+            top: 3px; left: 3px;
+            width: 18px; height: 18px;
+            background: var(--text-tertiary);
+            border-radius: 50%;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .toggle-switch.on .toggle-knob {
+            left: 21px;
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent-dim);
+        }
+
+        /* 버튼 그룹 (출력 형식) */
+        .btn-group {
+            display: flex;
+            gap: 6px;
+        }
+        .btn-group-item {
+            flex: 1;
+            padding: 8px 4px;
+            text-align: center;
+            background: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            letter-spacing: 0.5px;
+        }
+        .btn-group-item:hover {
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+        .btn-group-item.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--text-on-solid);
+        }
+
+        /* 하단 버튼들 */
+        .actions {
+            display: flex;
+            gap: 8px;
+        }
+        .btn {
+            flex: 1;
+            padding: 12px 16px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: center;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .btn-secondary {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .btn-secondary:hover {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+        }
+        .btn-primary {
+            background: var(--accent);
+            border: 1px solid transparent;
+            color: var(--text-on-solid);
+        }
+        .btn-primary:hover {
+            filter: brightness(1.1);
+        }
+
+        /* 저장 상태 */
+        .save-status {
+            text-align: center;
+            font-size: 12px;
+            color: var(--ok);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            height: 20px;
+        }
+        .save-status.show { opacity: 1; }
+
+        /* 로딩 */
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--overlay);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            opacity: 1;
+            transition: opacity 0.3s ease;
+        }
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        .loading-spinner {
+            width: 32px; height: 32px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <!-- 로딩 오버레이 -->
+    <div class="loading-overlay" id="loading">
+        <div class="loading-spinner"></div>
+    </div>
+
+    <div class="settings-panel">
+        <!-- 헤더 -->
+        <div class="header">
+            <h1>sonote 설정</h1>
+            <button class="theme-toggle-btn" id="theme-toggle" title="테마 전환">
+                <span id="theme-icon">&#9790;</span>
+            </button>
+        </div>
+
+        <!-- 마이크 선택 -->
+        <div class="card">
+            <div class="section-title">오디오</div>
+            <div class="field">
+                <label class="field-label" for="mic-select">마이크 장치</label>
+                <select class="field-select" id="mic-select">
+                    <option value="">장치를 불러오는 중...</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 토글 설정 -->
+        <div class="card">
+            <div class="section-title">녹음 옵션</div>
+            <div class="toggle-row">
+                <div>
+                    <div class="toggle-label">화자 분리</div>
+                    <div class="toggle-desc">발화자를 자동으로 구분합니다</div>
+                </div>
+                <div class="toggle-switch" data-key="diarize">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="toggle-row">
+                <div>
+                    <div class="toggle-label">미디어 자동 음소거</div>
+                    <div class="toggle-desc">녹음 시 시스템 오디오를 음소거합니다</div>
+                </div>
+                <div class="toggle-switch" data-key="auto_mute_media">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="toggle-row">
+                <div>
+                    <div class="toggle-label">트레이 최소화</div>
+                    <div class="toggle-desc">닫기 시 시스템 트레이로 최소화</div>
+                </div>
+                <div class="toggle-switch" data-key="minimize_to_tray">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 후처리 엔진 -->
+        <div class="card">
+            <div class="section-title">후처리</div>
+            <div class="field">
+                <label class="field-label" for="engine-select">후처리 엔진</label>
+                <select class="field-select" id="engine-select">
+                    <option value="auto">자동 (Auto)</option>
+                    <option value="codex">Codex</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="ollama">Ollama</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- 출력 형식 -->
+        <div class="card">
+            <div class="section-title">출력 형식</div>
+            <div class="btn-group" id="format-group">
+                <button class="btn-group-item" data-format="md">MD</button>
+                <button class="btn-group-item" data-format="docx">DOCX</button>
+                <button class="btn-group-item" data-format="pdf">PDF</button>
+                <button class="btn-group-item" data-format="txt">TXT</button>
+            </div>
+        </div>
+
+        <!-- Discord Webhook -->
+        <div class="card">
+            <div class="section-title">알림</div>
+            <div class="field">
+                <label class="field-label" for="discord-webhook">Discord Webhook URL</label>
+                <input
+                    class="field-input"
+                    id="discord-webhook"
+                    type="url"
+                    placeholder="https://discord.com/api/webhooks/..."
+                    spellcheck="false"
+                    autocomplete="off"
+                />
+            </div>
+        </div>
+
+        <!-- 하단 액션 -->
+        <div class="actions">
+            <button class="btn btn-secondary" id="open-viewer-btn" type="button">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="2" y="3" width="12" height="10" rx="2"/>
+                    <path d="M5 8h6M8 5v6"/>
+                </svg>
+                뷰어 열기
+            </button>
+            <button class="btn btn-primary" id="save-btn">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12.7 3.3l-6 6L4 6.6"/>
+                </svg>
+                저장
+            </button>
+        </div>
+
+        <div class="save-status" id="save-status"></div>
+    </div>
+
+    <script>
+    (function() {
+        "use strict";
+
+        /* ── 테마 ── */
+        function getTheme() {
+            return localStorage.getItem("sonote-theme") || "dark";
+        }
+        function setTheme(theme) {
+            document.documentElement.setAttribute("data-theme", theme);
+            localStorage.setItem("sonote-theme", theme);
+            document.getElementById("theme-icon").textContent = theme === "dark" ? "\u263E" : "\u2600";
+        }
+        document.getElementById("theme-toggle").addEventListener("click", function() {
+            setTheme(getTheme() === "dark" ? "light" : "dark");
+        });
+        setTheme(getTheme());
+
+        /* ── 상태 ── */
+        var state = {
+            microphone: "",
+            diarize: true,
+            auto_mute_media: false,
+            minimize_to_tray: false,
+            polish_engine: "auto",
+            output_format: "md",
+            discord_webhook_url: ""
+        };
+
+        /* ── DOM 참조 ── */
+        var micSelect      = document.getElementById("mic-select");
+        var engineSelect   = document.getElementById("engine-select");
+        var webhookInput   = document.getElementById("discord-webhook");
+        var formatGroup    = document.getElementById("format-group");
+        var openViewerBtn  = document.getElementById("open-viewer-btn");
+        var saveBtn        = document.getElementById("save-btn");
+        var saveStatus     = document.getElementById("save-status");
+        var loadingOverlay = document.getElementById("loading");
+
+        /* ── 토글 ── */
+        document.querySelectorAll(".toggle-switch").forEach(function(sw) {
+            sw.addEventListener("click", function() {
+                var key = sw.dataset.key;
+                state[key] = !state[key];
+                sw.classList.toggle("on", state[key]);
+            });
+        });
+
+        /* ── 출력 형식 버튼 그룹 ── */
+        formatGroup.querySelectorAll(".btn-group-item").forEach(function(btn) {
+            btn.addEventListener("click", function() {
+                state.output_format = btn.dataset.format;
+                updateFormatUI();
+            });
+        });
+
+        function updateFormatUI() {
+            formatGroup.querySelectorAll(".btn-group-item").forEach(function(btn) {
+                btn.classList.toggle("active", btn.dataset.format === state.output_format);
+            });
+        }
+
+        /* ── UI 동기화 ── */
+        function syncUI() {
+            /* 마이크 */
+            if (state.microphone) micSelect.value = state.microphone;
+
+            /* 토글 */
+            document.querySelectorAll(".toggle-switch").forEach(function(sw) {
+                sw.classList.toggle("on", !!state[sw.dataset.key]);
+            });
+
+            /* 후처리 엔진 */
+            engineSelect.value = state.polish_engine;
+
+            /* 출력 형식 */
+            updateFormatUI();
+
+            /* Webhook */
+            webhookInput.value = state.discord_webhook_url || "";
+        }
+
+        /* ── 마이크 장치 로드 ── */
+        function loadDevices() {
+            fetch("/api/audio-devices")
+                .then(function(r) { return r.json(); })
+                .then(function(devices) {
+                    micSelect.innerHTML = "";
+                    if (!devices || devices.length === 0) {
+                        var opt = document.createElement("option");
+                        opt.value = "";
+                        opt.textContent = "사용 가능한 장치 없음";
+                        micSelect.appendChild(opt);
+                        return;
+                    }
+                    devices.forEach(function(d) {
+                        var opt = document.createElement("option");
+                        opt.value = d.id != null ? d.id : d.name;
+                        opt.textContent = d.name;
+                        micSelect.appendChild(opt);
+                    });
+                    if (state.microphone) micSelect.value = state.microphone;
+                })
+                .catch(function() {
+                    micSelect.innerHTML = '<option value="">장치 로드 실패</option>';
+                });
+        }
+
+        /* ── 설정 로드 ── */
+        function loadSettings() {
+            fetch("/api/settings")
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data) {
+                        Object.keys(state).forEach(function(k) {
+                            if (data[k] !== undefined) state[k] = data[k];
+                        });
+                    }
+                    syncUI();
+                })
+                .catch(function() {
+                    syncUI();
+                })
+                .finally(function() {
+                    loadingOverlay.classList.add("hidden");
+                });
+        }
+
+        /* ── 설정 저장 ── */
+        function saveSettings() {
+            state.microphone = micSelect.value;
+            state.polish_engine = engineSelect.value;
+            state.discord_webhook_url = webhookInput.value.trim();
+
+            saveBtn.disabled = true;
+            saveBtn.style.opacity = "0.6";
+
+            fetch("/api/settings", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(state)
+            })
+            .then(function(r) {
+                if (!r.ok) throw new Error("저장 실패");
+                showStatus("설정이 저장되었습니다", false);
+            })
+            .catch(function() {
+                showStatus("저장에 실패했습니다", true);
+            })
+            .finally(function() {
+                saveBtn.disabled = false;
+                saveBtn.style.opacity = "1";
+            });
+        }
+
+        function showStatus(msg, isError) {
+            saveStatus.textContent = msg;
+            saveStatus.style.color = isError
+                ? "var(--danger)"
+                : "var(--ok)";
+            saveStatus.classList.add("show");
+            setTimeout(function() {
+                saveStatus.classList.remove("show");
+            }, 2500);
+        }
+
+        async function openViewer() {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.open_viewer) {
+                await window.pywebview.api.open_viewer();
+                return;
+            }
+            window.open("/", "_blank", "noopener");
+        }
+
+        openViewerBtn.addEventListener("click", openViewer);
+        saveBtn.addEventListener("click", saveSettings);
+
+        /* ── 초기화 ── */
+        loadDevices();
+        loadSettings();
+    })();
+    </script>
+</body>
+</html>

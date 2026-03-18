@@ -60,7 +60,24 @@ def test_schema_subcommand_outputs_all_command_schemas(
     assert payload["status"] == "success"
     assert payload["command"] == "schema"
     commands = payload["data"]["commands"]
-    assert {"transcribe", "live", "download", "probe", "scan", "smart", "profile", "enroll", "meeting", "approve-profiles", "status", "auto", "detect", "map", "approve"} <= set(commands)
+    assert {
+        "transcribe",
+        "live",
+        "download",
+        "probe",
+        "scan",
+        "smart",
+        "profile",
+        "enroll",
+        "meeting",
+        "approve-profiles",
+        "status",
+        "auto",
+        "detect",
+        "map",
+        "approve",
+        "autostart",
+    } <= set(commands)
 
 
 def test_schema_specific_command_outputs_single_schema(
@@ -619,3 +636,25 @@ def test_status_capabilities_contain_expected_keys(
     caps = payload["data"]["capabilities"]
     expected = {"cuda_available", "ffmpeg_available", "diarize_available", "yt_dlp_available", "ollama_available", "tray_available"}
     assert expected <= set(caps)
+
+
+def test_autostart_status_json(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_cmd_autostart", lambda args: print(cli.json_output(
+        "success",
+        "autostart",
+        data={
+            "action": "status",
+            "enabled": True,
+            "exe_path": "C:/sonote.exe",
+        },
+    )))
+
+    payload = _run_cli(["--json", "autostart", "--status"], capsys)
+
+    assert payload["status"] == "success"
+    assert payload["command"] == "autostart"
+    assert payload["data"]["action"] == "status"
+    assert payload["data"]["enabled"] is True

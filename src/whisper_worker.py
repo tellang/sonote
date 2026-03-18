@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import atexit
+import concurrent.futures
 import multiprocessing as mp
 import os
+import threading
+import time
 from queue import Empty
 from typing import Any
 
 import numpy as np
+
+from .runtime_env import calculate_bon_workers
 
 _CTRL_HANDLER = None
 
@@ -320,3 +325,251 @@ class WhisperWorker:
     @property
     def is_alive(self) -> bool:
         return self._process.is_alive() if self._started else False
+
+
+class WhisperWorkerPool:
+    """Whisper BoN 워커 풀 관리자."""
+
+    _DEFAULT_TEMPERATURES: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6)
+
+    def __init__(
+        self,
+        model_id: str = "large-v3-turbo",
+        language: str = "ko",
+        device: str = "cuda",
+        compute_type: str = "float16",
+        n_workers: int | None = None,
+    ) -> None:
+        self._model_id = model_id
+        self._language = language
+        self._device = device
+        self._compute_type = compute_type
+
+        if os.getenv("SONOTE_BETA") == "1":
+            target_workers = 1
+        elif n_workers is None:
+            target_workers = calculate_bon_workers()
+        else:
+            target_workers = int(n_workers)
+
+        safe_workers = max(1, min(target_workers, len(self._DEFAULT_TEMPERATURES)))
+        self._workers: list[WhisperWorker] = []
+        self._worker_locks: list[threading.Lock] = []
+        self._temperatures: list[float] = list(self._DEFAULT_TEMPERATURES[:safe_workers])
+        self._started = False
+        self._ready = False
+        self._target_workers = safe_workers
+
+        try:
+            self._workers = [self._new_worker() for _ in range(safe_workers)]
+            self._worker_locks = [threading.Lock() for _ in range(safe_workers)]
+        except Exception:
+            # 풀 구성 실패 시 단일 워커로 폴백
+            self._workers = [self._new_worker()]
+            self._worker_locks = [threading.Lock()]
+            self._temperatures = [self._DEFAULT_TEMPERATURES[0]]
+            self._target_workers = 1
+
+    @property
+    def n_workers(self) -> int:
+        return len(self._workers)
+
+    @property
+    def ready_workers(self) -> int:
+        """현재 사용 가능한 워커 수."""
+        return sum(1 for w in self._workers if w.is_ready)
+
+    @property
+    def is_ready(self) -> bool:
+        """최소 1개 워커가 준비되면 True."""
+        return any(w.is_ready for w in self._workers)
+
+    @property
+    def is_alive(self) -> bool:
+        if self.n_workers == 1:
+            return self._workers[0].is_alive
+        return any(worker.is_alive for worker in self._workers)
+
+    def _new_worker(self) -> WhisperWorker:
+        return WhisperWorker(
+            model_id=self._model_id,
+            language=self._language,
+            device=self._device,
+            compute_type=self._compute_type,
+        )
+
+    def _stop_all_workers(self) -> None:
+        for worker in self._workers:
+            try:
+                worker.stop()
+            except Exception:
+                pass
+
+    def _fallback_to_single_worker(
+        self,
+        start_worker: bool = False,
+        ready_timeout: float = 120.0,
+    ) -> None:
+        # 풀 오류 시 즉시 단일 워커로 축소
+        self._stop_all_workers()
+        self._workers = [self._new_worker()]
+        self._worker_locks = [threading.Lock()]
+        self._temperatures = [self._DEFAULT_TEMPERATURES[0]]
+        self._ready = False
+
+        if start_worker:
+            self._workers[0].start()
+            self._workers[0].wait_ready(timeout=ready_timeout)
+            self._started = True
+
+    def start(self) -> None:
+        """첫 번째 워커만 즉시 시작하고, 나머지는 백그라운드에서 점진적으로 로드."""
+        try:
+            # 첫 번째 워커 즉시 시작
+            self._workers[0].start()
+            self._started = True
+
+            # 나머지 워커는 백그라운드 스레드에서 순차 시작
+            if self.n_workers > 1:
+                threading.Thread(
+                    target=self._start_remaining_workers,
+                    daemon=True,
+                    name="bon-progressive-loader",
+                ).start()
+        except Exception:
+            self._fallback_to_single_worker(start_worker=True, ready_timeout=120.0)
+
+    def _start_remaining_workers(self) -> None:
+        """나머지 워커를 순차적으로 시작 — 각 워커 ready 후 다음 시작."""
+        import sys
+        for i in range(1, self.n_workers):
+            try:
+                self._workers[i].start()
+                self._workers[i].wait_ready(timeout=120.0)
+                print(
+                    f"[BoN] 워커 {i+1}/{self.n_workers} 준비 완료 (BoN×{self.ready_workers})",
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                print(f"[BoN] 워커 {i+1} 시작 실패: {exc}", file=sys.stderr)
+                break  # 이후 워커도 실패할 가능성 높음 → 현재까지만 사용
+
+    def wait_ready(self, timeout: float = 120.0) -> None:
+        """첫 번째 워커만 대기 — 나머지는 백그라운드에서 점진 로드."""
+        if not self._started:
+            raise RuntimeError("워커 풀이 시작되지 않음")
+        if self._ready:
+            return
+
+        try:
+            self._workers[0].wait_ready(timeout=timeout)
+            self._ready = True
+        except Exception:
+            self._fallback_to_single_worker(start_worker=True, ready_timeout=timeout)
+            self._ready = True
+
+    @staticmethod
+    def _score_segments(segments: list[dict[str, Any]]) -> float:
+        scores: list[float] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            value = segment.get("avg_logprob")
+            if value is None:
+                continue
+            try:
+                scores.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        if not scores:
+            return float("-inf")
+        return sum(scores) / len(scores)
+
+    @staticmethod
+    def _transcribe_with_lock(
+        worker: WhisperWorker,
+        lock: threading.Lock,
+        audio_chunk: np.ndarray,
+        kwargs: dict[str, Any],
+    ) -> list[dict]:
+        try:
+            return worker.transcribe(audio_chunk, **kwargs)
+        finally:
+            lock.release()
+
+    def transcribe(self, audio_chunk: np.ndarray, **kwargs: Any) -> list[dict]:
+        if not self._started:
+            raise RuntimeError("워커 풀이 시작되지 않음")
+
+        # ready인 워커만 수집
+        ready_indices = [i for i, w in enumerate(self._workers) if w.is_ready]
+
+        # ready 워커가 1개면 단일 모드 (오버헤드 없음)
+        if len(ready_indices) <= 1:
+            idx = ready_indices[0] if ready_indices else 0
+            return self._workers[idx].transcribe(audio_chunk, **kwargs)
+
+        selected_workers: list[tuple[int, concurrent.futures.Future[list[dict]]]] = []
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(ready_indices),
+            thread_name_prefix="whisper-bon",
+        )
+
+        try:
+            for idx in ready_indices:
+                worker = self._workers[idx]
+                lock = self._worker_locks[idx]
+                if not lock.acquire(blocking=False):
+                    continue
+
+                worker_kwargs = dict(kwargs)
+                worker_kwargs["temperature"] = self._temperatures[idx]
+
+                try:
+                    future = executor.submit(
+                        self._transcribe_with_lock,
+                        worker,
+                        lock,
+                        audio_chunk,
+                        worker_kwargs,
+                    )
+                    selected_workers.append((idx, future))
+                except Exception:
+                    lock.release()
+
+            if not selected_workers:
+                raise RuntimeError("사용 가능한 BoN 워커 없음")
+
+            futures = [future for _, future in selected_workers]
+            done, _ = concurrent.futures.wait(
+                futures,
+                timeout=5.0,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+
+            ranked_results: list[tuple[float, list[dict]]] = []
+            for idx, future in selected_workers:
+                if future not in done:
+                    continue
+                try:
+                    segments = future.result()
+                except Exception:
+                    continue
+                ranked_results.append((self._score_segments(segments), segments))
+
+            if not ranked_results:
+                raise RuntimeError("BoN 결과 수집 실패")
+
+            ranked_results.sort(key=lambda item: item[0], reverse=True)
+            return ranked_results[0][1]
+        except Exception:
+            # 풀 실행 실패 시 단일 워커로 즉시 폴백
+            self._fallback_to_single_worker(start_worker=True, ready_timeout=120.0)
+            return self._workers[0].transcribe(audio_chunk, **kwargs)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def stop(self) -> None:
+        self._stop_all_workers()
+        self._started = False
+        self._ready = False

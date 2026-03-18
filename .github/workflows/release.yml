@@ -1,0 +1,138 @@
+# GitHub Releases 자동 빌드 + 릴리스 워크플로우
+# 태그 push (v*) 시 PyInstaller onefile EXE 빌드 후 GitHub Release에 업로드
+# Asset 목록:
+#   - sonote.exe         (PyInstaller onefile EXE)
+#   - latest.json        (버전/다운로드URL/체크섬 메타데이터)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정 (3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: uv 설치
+        uses: astral-sh/setup-uv@v5
+
+      - name: uv 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-release-${{ runner.os }}-py3.11-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-release-${{ runner.os }}-py3.11-
+
+      - name: 의존성 설치 (desktop + PyInstaller)
+        run: |
+          uv sync --extra desktop
+          uv pip install pyinstaller
+
+      - name: 버전 추출
+        id: version
+        shell: bash
+        run: |
+          # 태그에서 버전 추출 (v1.2.3 → 1.2.3)
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "빌드 버전: ${VERSION}"
+
+      - name: PyInstaller onefile EXE 빌드
+        shell: bash
+        run: |
+          uv run python scripts/build.py --onefile
+        env:
+          SONOTE_BUILD_MODE: onefile
+
+      - name: EXE 존재 확인
+        shell: bash
+        run: |
+          if [ ! -f "dist/sonote.exe" ]; then
+            echo "[오류] dist/sonote.exe 파일이 없습니다."
+            exit 1
+          fi
+          echo "EXE 크기: $(du -h dist/sonote.exe | cut -f1)"
+
+      - name: SHA256 체크섬 계산
+        id: checksum
+        shell: bash
+        run: |
+          CHECKSUM=$(python -c "
+          import hashlib, sys
+          h = hashlib.sha256()
+          with open('dist/sonote.exe', 'rb') as f:
+              for chunk in iter(lambda: f.read(65536), b''):
+                  h.update(chunk)
+          print(h.hexdigest())
+          ")
+          echo "sha256=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+          echo "SHA256: ${CHECKSUM}"
+
+      - name: latest.json 생성
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          CHECKSUM="${{ steps.checksum.outputs.sha256 }}"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/sonote.exe"
+
+          python -c "
+          import json, sys
+          data = {
+              'version': '${VERSION}',
+              'download_url': '${DOWNLOAD_URL}',
+              'checksum': 'sha256:${CHECKSUM}',
+              'tag': '${TAG}',
+              'repository': '${{ github.repository }}',
+          }
+          print(json.dumps(data, indent=2, ensure_ascii=False))
+          " > dist/latest.json
+
+          echo "latest.json 내용:"
+          cat dist/latest.json
+
+      - name: GitHub Release 생성 및 Asset 업로드
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "sonote ${{ steps.version.outputs.version }}"
+          body: |
+            ## sonote ${{ steps.version.outputs.version }}
+
+            ### 설치 방법
+            1. `sonote.exe` 다운로드
+            2. 원하는 폴더에 저장 후 실행
+
+            ### 자동 업데이트
+            이미 sonote를 사용 중이라면:
+            ```
+            sonote update --install
+            ```
+
+            ### SHA256 체크섬
+            ```
+            ${{ steps.checksum.outputs.sha256 }}  sonote.exe
+            ```
+          files: |
+            dist/sonote.exe
+            dist/latest.json
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'a') || contains(steps.version.outputs.version, 'b') || contains(steps.version.outputs.version, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
