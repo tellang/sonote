@@ -582,6 +582,18 @@ def main():
         "--auto-start", action="store_true",
         help="BGM 구간을 건너뛰고 강의 시작 지점 자동 탐색",
     )
+    p_live.add_argument(
+        "--no-polish", action="store_true",
+        help="LLM 후처리 비활성화 (STT 교정 + 요약 생성 건너뜀)",
+    )
+    p_live.add_argument(
+        "--ollama", action="store_true",
+        help="Ollama 로컬 LLM으로 STT 교정/키워드 추출 (Codex/Gemini 대신)",
+    )
+    p_live.add_argument(
+        "--ollama-model", default="qwen3.5:9b",
+        help="Ollama 모델명 (기본: qwen3.5:9b)",
+    )
 
     # detect (구: probe): BGM↔강의 경계 탐색
     p_probe = subparsers.add_parser(
@@ -767,8 +779,8 @@ def main():
         help="Ollama 로컬 LLM으로 STT 교정/키워드 추출 (Codex/Gemini 대신)",
     )
     p_meeting.add_argument(
-        "--ollama-model", default="gemma3:27b",
-        help="Ollama 모델명 (기본: gemma3:27b)",
+        "--ollama-model", default="qwen3.5:9b",
+        help="Ollama 모델명 (기본: qwen3.5:9b)",
     )
     p_meeting.add_argument(
         "--fixed-chunking", action="store_true",
@@ -1229,7 +1241,7 @@ def _cmd_dry_run(args: argparse.Namespace) -> None:
             "profiles": getattr(args, "profiles", None),
             "polish": not getattr(args, "no_polish", False),
             "ollama": getattr(args, "ollama", False),
-            "ollama_model": getattr(args, "ollama_model", "gemma3:27b"),
+            "ollama_model": getattr(args, "ollama_model", "qwen3.5:9b"),
             "prompt": getattr(args, "prompt", ""),
         })
 
@@ -1625,6 +1637,9 @@ def _cmd_live(args):
             compute_type=compute_type,
             fmt=args.fmt,
             cookies_path=args.cookies,
+            use_polish=not getattr(args, "no_polish", False),
+            use_ollama=getattr(args, "ollama", False),
+            ollama_model=getattr(args, "ollama_model", None),
         )
         return
 
@@ -2119,7 +2134,7 @@ def _cmd_meeting_offline(args):
 
     # LLM 후처리 (meeting과 동일)
     _use_ollama = getattr(args, "ollama", False)
-    _ollama_model = getattr(args, "ollama_model", "gemma3:27b")
+    _ollama_model = getattr(args, "ollama_model", "qwen3.5:9b")
 
     if not getattr(args, "no_polish", False) and segment_count > 0:
         from .polish import is_codex_available, is_gemini_available, is_ollama_available
@@ -2252,17 +2267,46 @@ def _cmd_meeting(args):
     else:
         device, compute_type = detect_device()
 
-    # Whisper 워커 프로세스 시작 (비동기 — 캡처와 병렬 로드)
+    # Whisper 모델 동기 로드 (메인 프로세스 — Windows CUDA 서브프로세스 hang 회피)
     set_startup_status("loading_asr", f"STT 모델 로드 중 ({device}/{compute_type})...")
     print(f"[모델] {args.model} 로드 중 ({device}/{compute_type})...", file=sys.stderr)
-    worker = WhisperWorkerPool(
-        model_id=args.model,
-        language=args.language,
-        device=device,
-        compute_type=compute_type,
-        n_workers=1,
-    )
-    worker.start()  # 논블로킹: 모델 로드 완료를 기다리지 않음
+
+    from .runtime_env import bootstrap_nvidia_dll_path
+    bootstrap_nvidia_dll_path()
+    from faster_whisper import WhisperModel as _WM
+    _whisper_model = _WM(args.model, device=device, compute_type=compute_type)
+    if device == "cuda":
+        from .transcribe import _register_cuda_exit_guard
+        _register_cuda_exit_guard()
+    print("[모델] 로드 완료", file=sys.stderr)
+
+    # WhisperWorkerPool 호환 래퍼 (is_ready / transcribe 인터페이스)
+    class _InlineWhisperWorker:
+        @property
+        def is_ready(self):
+            return True
+
+        def transcribe(self, audio, **kwargs):
+            segs, _info = _whisper_model.transcribe(audio, **kwargs)
+            result = []
+            for s in segs:
+                d = {
+                    "start": s.start, "end": s.end, "text": s.text,
+                    "avg_logprob": s.avg_logprob, "no_speech_prob": s.no_speech_prob,
+                    "compression_ratio": s.compression_ratio,
+                }
+                if hasattr(s, "words") and s.words:
+                    d["words"] = [
+                        {"start": w.start, "end": w.end, "word": w.word, "probability": w.probability}
+                        for w in s.words
+                    ]
+                result.append(d)
+            return result
+
+        def stop(self):
+            pass
+
+    worker = _InlineWhisperWorker()
     # AGC (볼륨 자동 보정) — 마이크 거리 차이 보정
     agc = StreamingAGC()
 
@@ -2379,7 +2423,7 @@ def _cmd_meeting(args):
     _polish_pool = None
     _correction_futures: list[tuple] = []
     _use_ollama = getattr(args, "ollama", False)
-    _ollama_model = getattr(args, "ollama_model", None) or "gemma3:27b"
+    _ollama_model = getattr(args, "ollama_model", None) or "qwen3.5:9b"
     _correct_fn = None
     _extract_kw_fn = None
     if not args.no_polish:
@@ -2460,7 +2504,13 @@ def _cmd_meeting(args):
         audio_offset_seconds += chunk_duration_seconds
         writer.append_audio(chunk)
 
-        if not worker.is_ready:
+        try:
+            _worker_ready = worker.is_ready
+        except RuntimeError as exc:
+            print(f"[오류] {exc}", file=sys.stderr)
+            set_startup_status("error", str(exc))
+            raise
+        if not _worker_ready:
             _audio_prefetch_buffer.append(chunk)
             set_startup_status(
                 "loading_asr",

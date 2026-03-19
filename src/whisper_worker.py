@@ -146,14 +146,39 @@ def _worker_loop(
 
     bootstrap_nvidia_dll_path()
 
-    from faster_whisper import WhisperModel
+    import threading
 
-    try:
-        model = WhisperModel(model_id, device=device, compute_type=compute_type)
-    except Exception as exc:
-        out_q.put({"type": "error", "error": f"모델 로드 실패: {exc}"})
+    # import + 모델 로드를 모두 스레드에서 실행 (Windows CUDA 서브프로세스 hang 대응)
+    # faster_whisper import 자체가 CTranslate2 DLL + CUDA 초기화를 트리거하므로
+    # import도 타임아웃 범위 안에 포함해야 한다.
+    _model_ref: list = [None]
+    _load_error: list = [None]
+    _LOAD_TIMEOUT = 120  # 초
+
+    def _import_and_load() -> None:
+        try:
+            from faster_whisper import WhisperModel
+            _model_ref[0] = WhisperModel(model_id, device=device, compute_type=compute_type)
+        except Exception as exc:
+            _load_error[0] = exc
+
+    loader = threading.Thread(target=_import_and_load, daemon=True)
+    loader.start()
+    loader.join(timeout=_LOAD_TIMEOUT)
+
+    if loader.is_alive():
+        out_q.put({
+            "type": "error",
+            "error": f"모델 로드 타임아웃 ({_LOAD_TIMEOUT}초) — GPU 상태를 확인하세요. "
+                     "다른 프로세스가 GPU를 점유 중이거나 CUDA 초기화 문제일 수 있습니다.",
+        })
         raise SystemExit(1)
 
+    if _load_error[0]:
+        out_q.put({"type": "error", "error": f"모델 로드 실패: {_load_error[0]}"})
+        raise SystemExit(1)
+
+    model = _model_ref[0]
     out_q.put({"type": "ready"})  # 모델 로드 완료 신호
 
     try:
@@ -255,6 +280,13 @@ class WhisperWorker:
             return True
         if not self._started:
             return False
+        # 워커 프로세스가 죽었으면 즉시 에러
+        if not self._process.is_alive():
+            raise RuntimeError(
+                f"워커 프로세스 사망 (exit={self._process.exitcode}). "
+                "GPU 메모리 부족이거나 CUDA 오류일 수 있습니다. "
+                "다른 sonote/Python 프로세스가 GPU를 점유 중인지 확인하세요."
+            )
         try:
             msg = self._out_q.get_nowait()
             if msg.get("type") == "ready":

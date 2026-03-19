@@ -36,8 +36,8 @@ __all__ = [
 _DEFAULT_TIMEOUT = 300
 
 # --- Ollama 설정 ---
-_OLLAMA_DEFAULT_MODEL = "gemma3:27b"
-_OLLAMA_BASE_URL = "http://localhost:11434"
+_OLLAMA_DEFAULT_MODEL = "qwen3.5:9b"
+_OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 # --- 해시 기반 보정 캐시 (동일 텍스트 재보정 방지) ---
 _correction_cache: dict[str, list[str]] = {}

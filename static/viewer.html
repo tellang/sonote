@@ -4868,6 +4868,8 @@
             if (document.getElementById("loading-splash")) {
                 if (ready) {
                     SplashState.setReady();
+                } else if (startup?.phase === "error") {
+                    SplashState.setFailed(message);
                 } else {
                     SplashState.setLoading(message);
                 }

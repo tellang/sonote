@@ -1,6 +1,6 @@
 [project]
 name = "sonote"
-version = "2.0.0"
+version = "2.0.1"
 description = "AI 에이전트를 위한 소리 노트 — 실시간 한국어 음성 전사 CLI"
 requires-python = ">=3.11"
 authors = [{ name = "tellang" }]

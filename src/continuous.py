@@ -20,6 +20,112 @@ from .download import get_stream_url
 from .transcribe import save_transcript, detect_device, _register_cuda_exit_guard, DOMAIN_PROMPT
 
 
+def _seconds_to_hms(seconds: float) -> str:
+    """초 단위를 HH:MM:SS 문자열로 변환한다."""
+    total_seconds = max(0, int(seconds))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _build_meeting_markdown(segments: list[dict], started_at: float) -> str:
+    """연속 전사 세그먼트를 meeting.md 형식으로 렌더링한다."""
+    valid_segments = [seg for seg in segments if (seg.get("text") or "").strip()]
+    segment_count = len(valid_segments)
+    duration_seconds = max(
+        (float(seg.get("end", 0.0)) for seg in valid_segments),
+        default=0.0,
+    )
+    started_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started_at))
+    duration_text = _seconds_to_hms(duration_seconds)
+
+    lines: list[str] = [
+        "# 회의록",
+        "",
+        "# 회의 내용 요약",
+        "",
+        f"- 일시: {started_text}",
+        f"- 경과 시간: {duration_text}",
+        "- 참석자: Unknown (1명)",
+        f"- 총 세그먼트: {segment_count}개",
+        "- (요약은 회의 후 별도 작성)",
+        "",
+        "---",
+        "",
+        "# To-do",
+        "",
+        "- [ ] (회의 후 별도 작성)",
+        "",
+        "---",
+        "",
+        "# 대화 정리",
+        "",
+    ]
+
+    for seg in valid_segments:
+        text = (seg.get("text") or "").strip()
+        start_ts = _seconds_to_hms(float(seg.get("start", 0.0)))
+        end_ts = _seconds_to_hms(float(seg.get("end", 0.0)))
+        time_label = f"{start_ts} ~ {end_ts}"
+        lines.extend(
+            [
+                f"### Unknown · {time_label}",
+                "",
+                text,
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "---",
+            "",
+            "# Raw Data",
+            "",
+        ]
+    )
+
+    for seg in valid_segments:
+        text = (seg.get("text") or "").strip()
+        start_ts = _seconds_to_hms(float(seg.get("start", 0.0)))
+        end_ts = _seconds_to_hms(float(seg.get("end", 0.0)))
+        lines.append(f"- [{start_ts} ~ {end_ts}] [Unknown] {text}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _polish_continuous_transcript(
+    output_path: Path,
+    segments: list[dict],
+    started_at: float,
+    *,
+    use_ollama: bool = False,
+    ollama_model: str | None = None,
+) -> tuple[Path, Path, dict[str, bool]]:
+    """연속 전사 결과를 meeting/polished 마크다운으로 저장한다."""
+    valid_segments = [seg for seg in segments if (seg.get("text") or "").strip()]
+    meeting_path = output_path.with_name("transcript_meeting.md")
+    polished_path = output_path.with_name("transcript_polished.md")
+
+    meeting_path.write_text(
+        _build_meeting_markdown(valid_segments, started_at),
+        encoding="utf-8",
+    )
+    shutil.copy2(meeting_path, polished_path)
+
+    from .polish import polish_meeting
+
+    result = polish_meeting(
+        polished_path,
+        segment_count=len(valid_segments),
+        use_ollama=use_ollama,
+        ollama_model=ollama_model,
+    )
+    return meeting_path, polished_path, result
+
+
 def continuous_live(
     video_url: str,
     output_path: str | Path,
@@ -32,6 +138,9 @@ def continuous_live(
     format_id: str = "91",
     beam_size: int = 5,
     cookies_path: str | Path | None = None,
+    use_polish: bool = False,
+    use_ollama: bool = False,
+    ollama_model: str | None = None,
 ):
     """
     연속 라이브 트랜스크립션 실행
@@ -48,10 +157,14 @@ def continuous_live(
         format_id: yt-dlp 포맷 ID
         beam_size: 빔 서치 크기
         cookies_path: cookies.txt 경로 (None이면 자동 탐색)
+        use_polish: 전사 종료 후 LLM 후처리 실행 여부
+        use_ollama: True면 Ollama 우선 사용
+        ollama_model: Ollama 모델명
     """
     from faster_whisper import WhisperModel
 
     output_path = Path(output_path)
+    started_at = time.time()
 
     # 디바이스 감지
     if device is None or compute_type is None:
@@ -134,6 +247,20 @@ def continuous_live(
             save_transcript(all_segments, output_path, fmt=fmt)
             print(f"\n{'=' * 60}")
             print(f"[완료] 총 {len(all_segments)}개 세그먼트 → {output_path}")
+            if use_polish:
+                try:
+                    print("[후처리] meeting.md 생성 및 polish 실행 중...")
+                    meeting_path, polished_path, polish_result = _polish_continuous_transcript(
+                        output_path,
+                        all_segments,
+                        started_at,
+                        use_ollama=use_ollama,
+                        ollama_model=ollama_model,
+                    )
+                    print(f"[후처리] 회의록: {meeting_path}")
+                    print(f"[후처리] 후처리본: {polished_path} {polish_result}")
+                except Exception as e:
+                    print(f"[후처리] 실패: {e}")
         else:
             print("\n[완료] 변환된 세그먼트 없음")
 

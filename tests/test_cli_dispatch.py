@@ -77,6 +77,32 @@ class CliDispatchTests(unittest.TestCase):
         parsed_args = handler.call_args.args[0]
         self.assertEqual(parsed_args.url, "https://youtube.com/watch?v=test")
 
+    def test_live_command_dispatch_with_polish_options(self) -> None:
+        with patch.object(cli, "_cmd_live") as handler:
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "media-transcriber",
+                    "live",
+                    "https://youtube.com/watch?v=test",
+                    "--continuous",
+                    "--no-polish",
+                    "--ollama",
+                    "--ollama-model",
+                    "qwen3.5:9b",
+                ],
+            ):
+                cli.main()
+
+        handler.assert_called_once()
+        parsed_args = handler.call_args.args[0]
+        self.assertEqual(parsed_args.command, "live")
+        self.assertTrue(parsed_args.continuous)
+        self.assertTrue(parsed_args.no_polish)
+        self.assertTrue(parsed_args.ollama)
+        self.assertEqual(parsed_args.ollama_model, "qwen3.5:9b")
+
     def test_detect_command_dispatch(self) -> None:
         with patch.object(cli, "_cmd_probe") as handler:
             with patch.object(
