@@ -180,7 +180,7 @@ src/
 ├── diarize.py        # 화자 분리 (pyannote-audio)
 ├── download.py       # YouTube 오디오 다운로드
 ├── continuous.py     # 연속 실시간 변환
-├── polish.py         # LLM 후처리
+├── polish.py         # LLM 후처리 (실시간 교정 + 종료 후 일괄)
 └── whisper_worker.py # CUDA 격리 STT 워커
 static/
 └── viewer.html       # 자막 뷰어 (단일 HTML)

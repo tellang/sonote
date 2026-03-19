@@ -128,8 +128,60 @@ def _setup_cuda_dll_path() -> tuple[bool, str]:
         return False, f"CUDA 감지 실패: {e}"
 
 
+def _detect_torch_index_url() -> str | None:
+    """CUDA가 사용 가능하면 PyTorch CUDA 인덱스 URL 반환, 아니면 None(CPU)."""
+    # 이미 설치된 torch에서 CUDA 빌드 감지
+    try:
+        import torch
+        if torch.cuda.is_available():
+            # 설치된 torch의 CUDA 버전에서 인덱스 추론
+            cuda_ver = torch.version.cuda  # e.g. "12.6"
+            if cuda_ver:
+                tag = "cu" + cuda_ver.replace(".", "")  # "cu126"
+                return f"https://download.pytorch.org/whl/{tag}"
+        return None
+    except ImportError:
+        pass
+
+    # torch 미설치 시 nvidia-smi로 CUDA 존재 여부 확인
+    if shutil.which("nvidia-smi"):
+        return "https://download.pytorch.org/whl/cu126"
+    return None
+
+
+def _check_torch_consistency() -> tuple[bool, str]:
+    """torch/torchaudio/torchvision 빌드 버전(CUDA suffix)이 일치하는지 확인."""
+    try:
+        import torch
+        torch_ver = torch.__version__  # e.g. "2.8.0+cu126"
+    except ImportError:
+        return False, "torch 미설치"
+
+    suffix = ""
+    if "+" in torch_ver:
+        suffix = torch_ver.split("+")[1]  # "cu126" or "cpu"
+
+    mismatches: list[str] = []
+    for pkg_name in ("torchaudio", "torchvision"):
+        try:
+            mod = __import__(pkg_name)
+            pkg_ver = mod.__version__
+            pkg_suffix = pkg_ver.split("+")[1] if "+" in pkg_ver else ""
+            if pkg_suffix != suffix:
+                mismatches.append(f"{pkg_name} {pkg_ver} (expected +{suffix})")
+        except ImportError:
+            mismatches.append(f"{pkg_name} 미설치")
+
+    if mismatches:
+        return False, f"torch {torch_ver}와 불일치: {', '.join(mismatches)}"
+    return True, f"torch 스택 일관됨 ({torch_ver})"
+
+
 def _install_diarize() -> tuple[bool, str]:
-    """화자 분리 의존성 설치 (torch + pyannote-audio)."""
+    """화자 분리 의존성 설치 (torch + torchaudio + pyannote-audio)."""
+    index_url = _detect_torch_index_url()
+    torch_packages = ["torch", "torchaudio", "torchvision"]
+
     try:
         import torch  # noqa: F401
         torch_ok = True
@@ -137,10 +189,26 @@ def _install_diarize() -> tuple[bool, str]:
         torch_ok = False
 
     if not torch_ok:
-        # torch 먼저 설치 (CUDA 버전 자동 감지)
-        ok, msg = _pip_install("torch", "torchaudio", timeout=600)
+        # 신규 설치: CUDA 인덱스 URL 포함
+        args = torch_packages.copy()
+        if index_url:
+            args = ["--index-url", index_url] + args
+        ok, msg = _pip_install(*args, timeout=600)
         if not ok:
             return False, f"torch 설치 실패: {msg}"
+    else:
+        # 이미 설치됨 → 빌드 일관성 체크
+        consistent, detail = _check_torch_consistency()
+        if not consistent:
+            # 불일치 시 재설치
+            if not index_url:
+                index_url = _detect_torch_index_url()
+            args = torch_packages.copy()
+            if index_url:
+                args = ["--index-url", index_url] + args
+            ok, msg = _pip_install(*args, timeout=600)
+            if not ok:
+                return False, f"torch 스택 재설치 실패: {msg} (원인: {detail})"
 
     # pyannote-audio
     try:

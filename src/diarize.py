@@ -13,8 +13,8 @@ try:
     from pyannote.audio import Inference, Model
     from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
 
-    _PYANNOTE_IMPORT_ERROR: ImportError | None = None
-except ImportError as exc:  # pragma: no cover - 선택 의존성 처리
+    _PYANNOTE_IMPORT_ERROR: ImportError | OSError | None = None
+except (ImportError, OSError) as exc:  # pragma: no cover - 선택 의존성 처리
     torch = None  # type: ignore[assignment]
     Inference = None  # type: ignore[misc,assignment]
     Model = None  # type: ignore[misc,assignment]

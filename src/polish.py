@@ -1,11 +1,19 @@
-"""회의록 LLM 후처리 — Codex/Ollama(STT 교정) + Gemini/Ollama(요약 생성)
+"""LLM 기반 STT 후처리 — 실시간 교정 + 미팅 종료 후 일괄 처리 두 경로 제공.
 
-회의 종료 후 .md 파일을 자동 후처리:
-  1. Codex Pro 또는 Ollama: Raw Data의 STT 오인식을 맥락 기반 교정
-  2. Gemini 또는 Ollama: 구조화된 요약 + To-do 생성
+== 실시간 교정 (미팅 중) ==
+  meeting 파이프라인에서 10세그먼트마다 _correct_batch/_correct_batch_ollama를 호출.
+  ThreadPool 비동기로 Codex(또는 Ollama)가 STT 오인식을 교정하고, 교정 결과를
+  콜백(push_correction_sync)으로 웹 뷰어에 실시간 반영한다.
+  extract_keywords_with_codex/ollama도 동일 주기로 호출되어 도메인 키워드를
+  자동 추출 → 승격 → Whisper initial_prompt에 피드백한다.
 
-CLI 미설치 시 Ollama 폴백. --ollama로 Ollama 전용 모드.
---no-polish로 전체 비활성화.
+== 일괄 처리 (미팅 종료 후) ==
+  polish_meeting()이 .md 파일 전체를 대상으로:
+    1. Codex 또는 Ollama: Raw Data 전체를 병렬 배치로 STT 교정
+    2. Gemini 또는 Ollama: 구조화된 요약 + To-do 생성
+
+모델 우선순위: Codex → Ollama 폴백 (교정), Gemini → Ollama 폴백 (요약).
+--ollama로 Ollama 전용 모드. --no-polish로 전체 비활성화.
 """
 
 from __future__ import annotations
@@ -184,7 +192,7 @@ def correct_with_codex(md_path: Path, timeout: int = _DEFAULT_TIMEOUT) -> bool:
     ok, err = _run_cli(
         [
             "codex", "exec",
-            "--profile", "normal",
+            "--profile", "codex_med",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             prompt,
@@ -265,7 +273,7 @@ def _correct_batch(
     ok, err = _run_cli(
         [
             "codex", "exec",
-            "--profile", "normal",
+            "--profile", "codex_med",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             prompt,
