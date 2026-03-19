@@ -33,10 +33,12 @@ __all__ = [
     "is_gemini_available",
     "is_ollama_available",
     "extract_keywords_with_codex",
+    "extract_keywords_with_gemini",
     "extract_keywords_with_ollama",
     "correct_with_ollama_parallel",
     "summarize_with_ollama",
     "_correct_batch",
+    "_correct_batch_gemini",
     "_correct_batch_ollama",
 ]
 
@@ -110,20 +112,28 @@ def is_ollama_available(model: str = _OLLAMA_DEFAULT_MODEL) -> bool:
         return False
 
 
+def _resolve_cmd(name: str) -> str:
+    """Windows .cmd 래퍼를 포함해 실행 파일 전체 경로를 반환."""
+    path = shutil.which(name)
+    return path if path else name
+
+
 def _run_cli(args: list[str], timeout: int, cwd: str) -> tuple[bool, str]:
-    """CLI 명령 실행 — Windows/Unix 호환.
+    """CLI 명령 실행 — Windows/Unix 호환 (shell=False).
 
     Returns:
         (성공 여부, stderr 텍스트)
     """
+    resolved_args = list(args)
+    resolved_args[0] = _resolve_cmd(resolved_args[0])
     try:
         result = subprocess.run(
-            args,
+            resolved_args,
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=cwd,
-            shell=(os.name == "nt"),  # Windows .CMD 배치 파일 실행 지원
+            shell=False,
         )
         return result.returncode == 0, result.stderr.strip()
     except subprocess.TimeoutExpired:
@@ -273,7 +283,7 @@ def _correct_batch(
     ok, err = _run_cli(
         [
             "codex", "exec",
-            "--profile", "codex_med",
+            "--profile", "codex_low",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             prompt,
@@ -532,6 +542,125 @@ def extract_keywords_with_codex(
     output_path.unlink(missing_ok=True)
 
     return keywords
+
+
+# ---------------------------------------------------------------
+# Gemini CLI 기반 교정/추출 (실시간 기본 경로)
+# ---------------------------------------------------------------
+
+_GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-2.5-flash")
+
+
+def _run_gemini(
+    prompt: str,
+    model: str = _GEMINI_MODELS[0],
+    timeout: int = 120,
+) -> tuple[bool, str]:
+    """Gemini CLI 단일 호출. stdin으로 프롬프트 전달 (Windows 인자 길이 제한 회피).
+
+    Returns:
+        (성공 여부, stdout 텍스트 또는 에러 메시지)
+    """
+    args = [_resolve_cmd("gemini"), "-m", model, "-y"]
+    try:
+        result = subprocess.run(
+            args,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, result.stderr.strip() or f"exit {result.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, f"타임아웃 ({timeout}초)"
+    except (FileNotFoundError, OSError) as e:
+        return False, str(e)
+
+
+def _correct_batch_gemini(
+    batch_lines: list[str],
+    batch_idx: int,
+    model: str = _GEMINI_MODELS[0],
+    timeout: int = 120,
+    prev_context: list[str] | None = None,
+    next_context: list[str] | None = None,
+) -> tuple[int, bool, list[str]]:
+    """Gemini CLI로 단일 배치 STT 교정.
+
+    Args:
+        prev_context: 이전 배치의 마지막 N줄 (슬라이딩 윈도우 문맥)
+        next_context: 다음 배치의 첫 N줄 (슬라이딩 윈도우 문맥)
+    """
+    # 캐시 확인
+    batch_hash = _compute_batch_hash(batch_lines)
+    cached = _get_cached_correction(batch_hash)
+    if cached is not None and len(cached) == len(batch_lines):
+        print(f"[후처리] Gemini 배치 {batch_idx}: 캐시 히트")
+        return batch_idx, True, cached
+
+    text = "\n".join(batch_lines)
+    original_count = len(batch_lines)
+
+    # 도메인 키워드 힌트
+    domain_hint = _build_domain_keyword_hint()
+    domain_line = f"참고할 전문 용어: {domain_hint}\n" if domain_hint else ""
+
+    # 슬라이딩 윈도우 문맥
+    context_parts: list[str] = []
+    if prev_context:
+        context_parts.append("[이전 문맥 — 교정 대상 아님]\n" + "\n".join(prev_context))
+    if next_context:
+        context_parts.append("[다음 문맥 — 교정 대상 아님]\n" + "\n".join(next_context))
+    context_block = "\n\n".join(context_parts) + "\n\n" if context_parts else ""
+
+    prompt = (
+        "다음은 한국어 STT 결과입니다. 오인식된 부분만 교정하세요.\n"
+        f"{domain_line}"
+        "형식 '- [HH:MM:SS] [화자] 텍스트' 유지. 타임스탬프/화자 수정 금지.\n"
+        "줄 삭제/추가 금지. 줄 수 반드시 유지.\n"
+        f"{context_block}"
+        "[교정 대상]\n"
+        f"{text}\n\n"
+        "교정 결과만 출력:"
+    )
+
+    ok, result = _run_gemini(prompt, model, timeout)
+    if not ok:
+        print(f"[후처리] Gemini({model}) 배치 {batch_idx} 실패: {result[:200]}")
+        return batch_idx, False, batch_lines
+
+    result_lines = [line for line in result.strip().split("\n") if line.strip()]
+    if len(result_lines) == original_count:
+        _set_cached_correction(batch_hash, result_lines)
+        return batch_idx, True, result_lines
+
+    print(
+        f"[후처리] Gemini({model}) 배치 {batch_idx}: 줄 수 불일치 "
+        f"({original_count} → {len(result_lines)}), 원본 유지"
+    )
+    return batch_idx, False, batch_lines
+
+
+def extract_keywords_with_gemini(
+    text: str,
+    model: str = _GEMINI_MODELS[0],
+    timeout: int = 30,
+) -> list[str]:
+    """Gemini CLI로 도메인 키워드 추출."""
+    prompt = (
+        "다음 회의 전사 텍스트에서 도메인 특화 키워드만 추출하세요.\n"
+        "전문 용어, 고유명사, 기술 용어, 프로젝트명, 약어만.\n"
+        "쉼표로 구분된 키워드 목록만 출력. 설명 없이.\n\n"
+        f"{text}\n\n"
+        "키워드:"
+    )
+    ok, result = _run_gemini(prompt, model, timeout)
+    if not ok:
+        return []
+    return [k.strip() for k in result.replace("\n", ",").split(",") if k.strip()]
 
 
 # ---------------------------------------------------------------

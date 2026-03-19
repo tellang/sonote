@@ -4,18 +4,112 @@ from __future__ import annotations
 
 import atexit
 import concurrent.futures
+import json
 import multiprocessing as mp
 import os
 import threading
 import time
+from pathlib import Path
 from queue import Empty
 from typing import Any
 
 import numpy as np
 
-from .runtime_env import calculate_bon_workers
+from .runtime_env import calculate_bon_workers, get_available_vram
 
 _CTRL_HANDLER = None
+
+# ---------------------------------------------------------------------------
+# PID 레지스트리 — 좀비 워커 방지
+# ---------------------------------------------------------------------------
+_PID_REGISTRY = (
+    Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")))
+    / "sonote"
+    / "run"
+    / "workers.json"
+)
+
+
+def _read_pid_registry() -> dict:
+    """레지스트리 파일을 읽어 dict로 반환. 실패 시 빈 레지스트리."""
+    try:
+        return json.loads(_PID_REGISTRY.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "pool_pid": None, "workers": []}
+
+
+def _write_pid_registry(data: dict) -> None:
+    """레지스트리를 원자적으로 갱신 (tmp → rename)."""
+    _PID_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PID_REGISTRY.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(_PID_REGISTRY))
+
+
+def _is_process_alive(pid: int) -> bool:
+    """pid 프로세스가 살아있는지 확인."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            # PROCESS_QUERY_LIMITED_INFORMATION
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
+def _cleanup_stale_workers() -> int:
+    """레지스트리의 좀비 워커를 정리하고 제거 수를 반환."""
+    registry = _read_pid_registry()
+    pool_pid = registry.get("pool_pid")
+    workers = registry.get("workers", [])
+    if not workers:
+        return 0
+
+    pool_alive = _is_process_alive(pool_pid) if pool_pid else False
+    cleaned = 0
+    remaining: list[dict] = []
+
+    for w in workers:
+        pid = w.get("pid")
+        if not pid:
+            continue
+        if not _is_process_alive(pid):
+            cleaned += 1
+            continue
+        if not pool_alive:
+            # 부모 죽었는데 자식 살아있음 → kill
+            try:
+                if os.name == "nt":
+                    import ctypes
+
+                    handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                    if handle:
+                        ctypes.windll.kernel32.TerminateProcess(handle, 1)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+                else:
+                    os.kill(pid, 9)
+                cleaned += 1
+            except Exception:
+                remaining.append(w)
+        else:
+            remaining.append(w)
+
+    registry["workers"] = remaining
+    if not remaining:
+        registry["pool_pid"] = None
+    _write_pid_registry(registry)
+    return cleaned
 
 
 def _bind_to_job_object(pid: int) -> None:
@@ -377,6 +471,12 @@ class WhisperWorkerPool:
         self._device = device
         self._compute_type = compute_type
 
+        # 좀비 워커 정리 (이전 실행 잔류 프로세스)
+        cleaned = _cleanup_stale_workers()
+        if cleaned:
+            import sys
+            print(f"[pool] 좀비 워커 {cleaned}개 정리 완료", file=sys.stderr)
+
         if os.getenv("SONOTE_BETA") == "1":
             target_workers = 1
         elif n_workers is None:
@@ -391,6 +491,9 @@ class WhisperWorkerPool:
         self._started = False
         self._ready = False
         self._target_workers = safe_workers
+        self._pool_lock = threading.Lock()  # 동적 스케일링 동기화
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop = threading.Event()
 
         try:
             self._workers = [self._new_worker() for _ in range(safe_workers)]
@@ -461,6 +564,18 @@ class WhisperWorkerPool:
             self._workers[0].start()
             self._started = True
 
+            # PID 레지스트리 업데이트
+            self._update_pid_registry()
+
+            # 하트비트 데몬 시작
+            self._heartbeat_stop.clear()
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                daemon=True,
+                name="pool-heartbeat",
+            )
+            self._heartbeat_thread.start()
+
             # 나머지 워커는 백그라운드 스레드에서 순차 시작
             if self.n_workers > 1:
                 threading.Thread(
@@ -478,6 +593,7 @@ class WhisperWorkerPool:
             try:
                 self._workers[i].start()
                 self._workers[i].wait_ready(timeout=120.0)
+                self._update_pid_registry()
                 print(
                     f"[BoN] 워커 {i+1}/{self.n_workers} 준비 완료 (BoN×{self.ready_workers})",
                     file=sys.stderr,
@@ -502,20 +618,31 @@ class WhisperWorkerPool:
 
     @staticmethod
     def _score_segments(segments: list[dict[str, Any]]) -> float:
-        scores: list[float] = []
+        """Duration-weighted avg_logprob 스코어링.
+
+        각 세그먼트의 avg_logprob를 해당 세그먼트 길이(초)로 가중 평균한다.
+        짧은 hallucination 세그먼트가 점수를 왜곡하는 것을 방지한다.
+        """
+        weighted_sum = 0.0
+        total_duration = 0.0
         for segment in segments:
             if not isinstance(segment, dict):
                 continue
-            value = segment.get("avg_logprob")
-            if value is None:
+            logprob = segment.get("avg_logprob")
+            if logprob is None:
                 continue
             try:
-                scores.append(float(value))
+                logprob = float(logprob)
             except (TypeError, ValueError):
                 continue
-        if not scores:
+            start = float(segment.get("start", 0))
+            end = float(segment.get("end", 0))
+            duration = max(end - start, 0.01)  # 최소 10ms
+            weighted_sum += logprob * duration
+            total_duration += duration
+        if total_duration <= 0:
             return float("-inf")
-        return sum(scores) / len(scores)
+        return weighted_sum / total_duration
 
     @staticmethod
     def _transcribe_with_lock(
@@ -602,6 +729,157 @@ class WhisperWorkerPool:
             executor.shutdown(wait=False, cancel_futures=True)
 
     def stop(self) -> None:
+        # 하트비트 데몬 종료
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=2)
+        self._heartbeat_thread = None
+
         self._stop_all_workers()
         self._started = False
         self._ready = False
+
+        # PID 레지스트리 정리
+        try:
+            registry = _read_pid_registry()
+            if registry.get("pool_pid") == os.getpid():
+                registry["pool_pid"] = None
+                registry["workers"] = []
+                _write_pid_registry(registry)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # PID 레지스트리 업데이트
+    # ------------------------------------------------------------------
+    def _update_pid_registry(self) -> None:
+        """현재 살아있는 워커 PID를 레지스트리에 기록."""
+        try:
+            worker_entries = []
+            for i, w in enumerate(self._workers):
+                if w._started and w._process.pid is not None:
+                    worker_entries.append({
+                        "pid": w._process.pid,
+                        "index": i,
+                        "started_at": time.time(),
+                    })
+            registry = {
+                "version": 1,
+                "pool_pid": os.getpid(),
+                "workers": worker_entries,
+            }
+            _write_pid_registry(registry)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 하트비트 루프 — 5초 주기로 워커 liveness 체크
+    # ------------------------------------------------------------------
+    def _heartbeat_loop(self) -> None:
+        """데몬 스레드: 죽은 워커 감지 및 정리."""
+        import sys
+        while not self._heartbeat_stop.wait(timeout=5.0):
+            if not self._started:
+                break
+            with self._pool_lock:
+                for i, w in enumerate(self._workers):
+                    if not w._started:
+                        continue
+                    if not w._process.is_alive():
+                        print(
+                            f"[heartbeat] 워커 {i} (pid={w._process.pid}) 사망 감지, "
+                            f"exit={w._process.exitcode}",
+                            file=sys.stderr,
+                        )
+                        # 죽은 워커를 새 워커로 교체
+                        try:
+                            new_w = self._new_worker()
+                            new_w.start()
+                            new_w.wait_ready(timeout=60.0)
+                            self._workers[i] = new_w
+                            self._worker_locks[i] = threading.Lock()
+                            print(
+                                f"[heartbeat] 워커 {i} 교체 완료",
+                                file=sys.stderr,
+                            )
+                            self._update_pid_registry()
+                        except Exception as exc:
+                            print(
+                                f"[heartbeat] 워커 {i} 교체 실패: {exc}",
+                                file=sys.stderr,
+                            )
+
+    # ------------------------------------------------------------------
+    # 동적 스케일링
+    # ------------------------------------------------------------------
+    def add_worker(self) -> int:
+        """워커 1개 추가. VRAM 부족 시 RuntimeError. 새 워커 인덱스 반환."""
+        with self._pool_lock:
+            if len(self._workers) >= len(self._DEFAULT_TEMPERATURES):
+                raise RuntimeError(
+                    f"최대 워커 수({len(self._DEFAULT_TEMPERATURES)})에 도달"
+                )
+            # VRAM 체크 (모델 1개 로드에 ~800MB 필요)
+            vram_mb = get_available_vram() // (1024 * 1024)
+            if vram_mb < 800:
+                raise RuntimeError(
+                    f"VRAM 부족: {vram_mb}MB 남음 (최소 800MB 필요)"
+                )
+
+            idx = len(self._workers)
+            new_w = self._new_worker()
+            self._workers.append(new_w)
+            self._worker_locks.append(threading.Lock())
+            self._temperatures.append(self._DEFAULT_TEMPERATURES[idx])
+
+            if self._started:
+                new_w.start()
+                new_w.wait_ready(timeout=120.0)
+                self._update_pid_registry()
+
+            return idx
+
+    def remove_worker(self, index: int | None = None) -> None:
+        """워커 1개 제거. 최소 1개는 유지. index 미지정 시 마지막 워커 제거."""
+        with self._pool_lock:
+            if len(self._workers) <= 1:
+                raise RuntimeError("최소 1개 워커는 유지해야 합니다")
+
+            if index is None:
+                index = len(self._workers) - 1
+
+            if index < 0 or index >= len(self._workers):
+                raise IndexError(f"유효하지 않은 워커 인덱스: {index}")
+
+            worker = self._workers.pop(index)
+            self._worker_locks.pop(index)
+            self._temperatures.pop(index)
+
+            try:
+                worker.stop()
+            except Exception:
+                pass
+
+            if self._started:
+                self._update_pid_registry()
+
+    def scale_to(self, n: int) -> None:
+        """워커 수를 n개로 조정. 최소 1, 최대 len(_DEFAULT_TEMPERATURES)."""
+        n = max(1, min(n, len(self._DEFAULT_TEMPERATURES)))
+        current = len(self._workers)
+
+        if n == current:
+            return
+
+        if n > current:
+            for _ in range(n - current):
+                try:
+                    self.add_worker()
+                except RuntimeError:
+                    break  # VRAM 부족 등 → 가능한 만큼만 추가
+        else:
+            for _ in range(current - n):
+                try:
+                    self.remove_worker()
+                except RuntimeError:
+                    break

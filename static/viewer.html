@@ -5297,8 +5297,8 @@
             segSpan.textContent = nextText;
             text.appendChild(segSpan);
 
-            // 신뢰도 낮은 세그먼트 어둡게 표시 (confidence < 0.5)
-            if (item.confidence != null && item.confidence < 0.5) {
+            // 신뢰도 낮은 세그먼트 어둡게 표시 (confidence < 0.7)
+            if (item.confidence != null && item.confidence < 0.7) {
                 line.classList.add("low-confidence");
             }
 

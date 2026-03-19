@@ -13,14 +13,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.desktop import (
+from src.desktop_app.controller import (
     DesktopController,
     _fetch_json,
     _find_free_port,
     _format_elapsed,
-    _open_app_mode,
     _wait_for_server_ready,
 )
+from src.desktop_app.browser import _open_app_mode
 
 
 # ---------------------------------------------------------------------------
@@ -104,17 +104,17 @@ class TestFindAppModeBrowser:
 
     def test_returns_none_on_non_windows(self, monkeypatch):
         """win32가 아닌 플랫폼에서는 None을 반환한다."""
-        import src.desktop as desktop_module
+        import src.desktop_app.browser as desktop_module
 
         monkeypatch.setattr(desktop_module.sys, "platform", "linux")
 
-        from src.desktop import _find_app_mode_browser
+        from src.desktop_app.browser import _find_app_mode_browser
 
         assert _find_app_mode_browser() is None
 
     def test_returns_path_when_browser_found_in_env(self, monkeypatch, tmp_path):
         """PROGRAMFILES에 브라우저 실행파일이 있으면 해당 경로를 반환한다."""
-        import src.desktop as desktop_module
+        import src.desktop_app.browser as desktop_module
 
         monkeypatch.setattr(desktop_module.sys, "platform", "win32")
 
@@ -128,14 +128,14 @@ class TestFindAppModeBrowser:
         monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
         monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
-        from src.desktop import _find_app_mode_browser
+        from src.desktop_app.browser import _find_app_mode_browser
 
         result = _find_app_mode_browser()
         assert result == str(fake_edge)
 
     def test_returns_chrome_when_edge_not_found(self, monkeypatch, tmp_path):
         """Edge가 없고 Chrome이 있으면 Chrome 경로를 반환한다."""
-        import src.desktop as desktop_module
+        import src.desktop_app.browser as desktop_module
 
         monkeypatch.setattr(desktop_module.sys, "platform", "win32")
 
@@ -149,14 +149,14 @@ class TestFindAppModeBrowser:
         monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
         monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
-        from src.desktop import _find_app_mode_browser
+        from src.desktop_app.browser import _find_app_mode_browser
 
         result = _find_app_mode_browser()
         assert result == str(fake_chrome)
 
     def test_returns_none_when_no_browser_found(self, monkeypatch, tmp_path):
         """브라우저가 전혀 없으면 None을 반환한다."""
-        import src.desktop as desktop_module
+        import src.desktop_app.browser as desktop_module
 
         monkeypatch.setattr(desktop_module.sys, "platform", "win32")
         monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
@@ -164,15 +164,15 @@ class TestFindAppModeBrowser:
         monkeypatch.delenv("LOCALAPPDATA", raising=False)
 
         # shutil.which도 None 반환하도록 패치
-        monkeypatch.setattr("src.desktop.shutil.which", lambda name: None)
+        monkeypatch.setattr("src.desktop_app.browser.shutil.which", lambda name: None)
 
-        from src.desktop import _find_app_mode_browser
+        from src.desktop_app.browser import _find_app_mode_browser
 
         assert _find_app_mode_browser() is None
 
     def test_falls_back_to_path_search(self, monkeypatch, tmp_path):
         """PROGRAMFILES에 없어도 PATH에 msedge가 있으면 그 경로를 반환한다."""
-        import src.desktop as desktop_module
+        import src.desktop_app.browser as desktop_module
 
         monkeypatch.setattr(desktop_module.sys, "platform", "win32")
         monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
@@ -181,11 +181,11 @@ class TestFindAppModeBrowser:
 
         fake_msedge = str(tmp_path / "msedge.exe")
         monkeypatch.setattr(
-            "src.desktop.shutil.which",
+            "src.desktop_app.browser.shutil.which",
             lambda name: fake_msedge if name == "msedge" else None,
         )
 
-        from src.desktop import _find_app_mode_browser
+        from src.desktop_app.browser import _find_app_mode_browser
 
         result = _find_app_mode_browser()
         assert result == fake_msedge
@@ -201,17 +201,17 @@ class TestOpenAppMode:
 
     def test_returns_false_when_no_browser_found(self, monkeypatch):
         """브라우저를 찾지 못하면 False를 반환한다."""
-        monkeypatch.setattr("src.desktop._find_app_mode_browser", lambda: None)
+        monkeypatch.setattr("src.desktop_app.browser._find_app_mode_browser", lambda: None)
         assert _open_app_mode("http://localhost:8765") is False
 
     def test_returns_true_when_browser_launched(self, monkeypatch, tmp_path):
         """브라우저 실행에 성공하면 True를 반환한다."""
         fake_browser = str(tmp_path / "fake_browser.exe")
         monkeypatch.setattr(
-            "src.desktop._find_app_mode_browser", lambda: fake_browser
+            "src.desktop_app.browser._find_app_mode_browser", lambda: fake_browser
         )
 
-        with patch("src.desktop.subprocess.Popen") as mock_popen:
+        with patch("src.desktop_app.browser.subprocess.Popen") as mock_popen:
             mock_popen.return_value = MagicMock()
             result = _open_app_mode("http://localhost:8765")
 
@@ -224,11 +224,11 @@ class TestOpenAppMode:
     def test_returns_false_on_oserror(self, monkeypatch, tmp_path):
         """Popen이 OSError를 발생시키면 False를 반환한다."""
         monkeypatch.setattr(
-            "src.desktop._find_app_mode_browser",
+            "src.desktop_app.browser._find_app_mode_browser",
             lambda: str(tmp_path / "nonexistent.exe"),
         )
 
-        with patch("src.desktop.subprocess.Popen", side_effect=OSError("실행 실패")):
+        with patch("src.desktop_app.browser.subprocess.Popen", side_effect=OSError("실행 실패")):
             result = _open_app_mode("http://localhost:8765")
 
         assert result is False
@@ -255,7 +255,7 @@ class TestWaitForServerReady:
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        with patch("src.desktop.urllib.request.urlopen", return_value=mock_response):
+        with patch("src.desktop_app.controller.urllib.request.urlopen", return_value=mock_response):
             # 예외 없이 반환되어야 한다
             _wait_for_server_ready("http://127.0.0.1:8765", timeout_seconds=5.0)
 
@@ -275,7 +275,7 @@ class TestFetchJson:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.read.return_value = b'{"status": "ok", "elapsed": 120}'
 
-        with patch("src.desktop.urllib.request.urlopen", return_value=mock_response):
+        with patch("src.desktop_app.controller.urllib.request.urlopen", return_value=mock_response):
             result = _fetch_json("http://127.0.0.1:8765/status")
 
         assert result == {"status": "ok", "elapsed": 120}
@@ -287,7 +287,7 @@ class TestFetchJson:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.read.return_value = b'["list", "response"]'
 
-        with patch("src.desktop.urllib.request.urlopen", return_value=mock_response):
+        with patch("src.desktop_app.controller.urllib.request.urlopen", return_value=mock_response):
             result = _fetch_json("http://127.0.0.1:8765/status")
 
         assert result == {}
@@ -339,7 +339,7 @@ class TestDesktopControllerShutdown:
         """shutdown() 호출 후 stop_event가 설정된다."""
         ctrl = DesktopController(port=19880)
 
-        with patch("src.desktop.request_shutdown"):
+        with patch("src.desktop_app.controller.request_shutdown"):
             ctrl.shutdown()
 
         assert ctrl.stop_event.is_set()
@@ -348,7 +348,7 @@ class TestDesktopControllerShutdown:
         """shutdown()은 server의 request_shutdown()을 호출한다."""
         ctrl = DesktopController(port=19881)
 
-        with patch("src.desktop.request_shutdown") as mock_shutdown:
+        with patch("src.desktop_app.controller.request_shutdown") as mock_shutdown:
             ctrl.shutdown()
 
         mock_shutdown.assert_called_once()
@@ -357,7 +357,7 @@ class TestDesktopControllerShutdown:
         """shutdown()을 두 번 호출해도 예외가 발생하지 않는다."""
         ctrl = DesktopController(port=19882)
 
-        with patch("src.desktop.request_shutdown"):
+        with patch("src.desktop_app.controller.request_shutdown"):
             ctrl.shutdown()
             ctrl.shutdown()  # 두 번째 호출 — 예외 없음
 
@@ -367,7 +367,7 @@ class TestDesktopControllerShutdown:
         mock_tray = MagicMock()
         ctrl.tray = mock_tray
 
-        with patch("src.desktop.request_shutdown"):
+        with patch("src.desktop_app.controller.request_shutdown"):
             ctrl.shutdown()
 
         mock_tray.stop.assert_called_once()
@@ -386,7 +386,7 @@ class TestDesktopControllerToggleRecording:
         ctrl = DesktopController(port=19884)
 
         with patch(
-            "src.desktop.toggle_pause_state", return_value={"paused": True}
+            "src.desktop_app.controller.toggle_pause_state", return_value={"paused": True}
         ) as mock_toggle:
             ctrl.toggle_recording()
 
@@ -399,7 +399,7 @@ class TestDesktopControllerToggleRecording:
         ctrl.tray = mock_tray
 
         with patch(
-            "src.desktop.toggle_pause_state", return_value={"paused": False}
+            "src.desktop_app.controller.toggle_pause_state", return_value={"paused": False}
         ):
             ctrl.toggle_recording()
 

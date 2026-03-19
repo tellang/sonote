@@ -1275,7 +1275,24 @@ def _cmd_transcribe(args):
     if is_ndjson:
         print(_ndjson_line("start", command="transcribe", audio=str(audio_path)))
 
-    # CUDA 크래시 전에 즉시 저장
+    if getattr(args, "chunk", None) and args.chunk > 0:
+        segments = transcribe_chunks(
+            str(audio_path),
+            model_id=args.model,
+            language=args.language,
+            chunk_minutes=args.chunk,
+            device=device,
+            compute_type=compute_type,
+        )
+    else:
+        segments = transcribe_audio(
+            str(audio_path),
+            model_id=args.model,
+            language=args.language,
+            device=device,
+            compute_type=compute_type,
+        )
+
     save_transcript(segments, output_path, fmt=args.fmt)
 
     # NDJSON: 세그먼트별 줄 단위 출력 (--fields 적용)
@@ -1925,87 +1942,102 @@ def _score_transcription_candidate(segments: list[dict]) -> float:
     if not segments:
         return float("-inf")
 
-    score = 0.0
+    total_score = 0.0
+    total_duration = 0.0
     for seg in segments:
         text = (seg.get("text") or "").strip()
+        duration = max(float(seg.get("end", 0)) - float(seg.get("start", 0)), 0.1)
         if not text:
-            score -= 2.0
+            total_score -= 2.0 * duration
+            total_duration += duration
             continue
-        score += float(seg.get("avg_logprob", -2.0))
-        score -= float(seg.get("no_speech_prob", 0.0))
-        score -= max(0.0, float(seg.get("compression_ratio", 0.0)) - 2.2)
-        score += min(len(text), 80) / 80.0
-        score += _mean_word_probability(seg)
-    return score / max(len(segments), 1)
+        avg_lp = float(seg.get("avg_logprob", -2.0))
+        no_speech = float(seg.get("no_speech_prob", 0.0))
+        compression = float(seg.get("compression_ratio", 0.0))
+        wp = _mean_word_probability(seg)
+
+        seg_score = avg_lp
+        seg_score -= no_speech * 1.5
+        seg_score -= max(0.0, compression - 1.8) * 0.8
+        seg_score += wp
+        # 환각 복합 페널티
+        if compression > 2.0 and avg_lp < -0.7:
+            seg_score -= 1.5
+        # 반복 bigram 페널티
+        words = text.split()
+        if len(words) >= 4:
+            bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words)-1)]
+            if len(set(bigrams)) / len(bigrams) < 0.5:
+                seg_score -= 2.0
+
+        total_score += seg_score * duration
+        total_duration += duration
+    return total_score / max(total_duration, 0.1)
 
 
-def _needs_bon_retry(segments: list[dict]) -> bool:
+def _needs_bon_retry(segments: list[dict], bad_ratio_threshold: float = 0.35) -> bool:
     if not segments:
         return False
-
+    bad_count = 0
+    evaluated_count = 0
     for seg in segments:
-        if float(seg.get("avg_logprob", 0.0)) < -0.9:
-            return True
-        if float(seg.get("no_speech_prob", 0.0)) > 0.4:
-            return True
-        if float(seg.get("compression_ratio", 0.0)) > 2.2:
-            return True
-        if seg.get("words") and _mean_word_probability(seg) < 0.55:
-            return True
-    return False
+        text = (seg.get("text") or "").strip()
+        duration = max(float(seg.get("end", 0)) - float(seg.get("start", 0)), 0.0)
+        # 2초 미만 짧은 추임새는 평가 제외
+        if duration < 2.0 and len(text) < 10:
+            continue
+        evaluated_count += 1
+        is_bad = (
+            float(seg.get("avg_logprob", 0.0)) < -0.9
+            or float(seg.get("no_speech_prob", 0.0)) > 0.5
+            or float(seg.get("compression_ratio", 0.0)) > 2.4
+            or (seg.get("words") and _mean_word_probability(seg) < 0.45)
+        )
+        if is_bad:
+            bad_count += 1
+    return evaluated_count > 0 and (bad_count / evaluated_count) >= bad_ratio_threshold
 
 
 def _run_selective_bon(
     worker,
-    chunk: np.ndarray,
+    chunk,
     args,
     rolling_context: str,
     domain_hint: str,
     baseline_segments: list[dict],
 ) -> list[dict]:
+    # Pool 워커 >= 2면 이미 Pool에서 BoN 완료 → skip
+    if hasattr(worker, 'ready_workers') and worker.ready_workers >= 2:
+        return baseline_segments
     if not _needs_bon_retry(baseline_segments):
         return baseline_segments
+    # no_speech > 0.6 && logprob < -1.0 세그먼트만 있으면 skip (무음)
+    real_segments = [s for s in baseline_segments if not (
+        float(s.get("no_speech_prob", 0)) > 0.6 and float(s.get("avg_logprob", 0)) < -1.0
+    )]
+    if not real_segments:
+        return baseline_segments
 
-    candidate_runs = [baseline_segments]
-    retry_configs = [
-        {
-            "beam_size": 8,
-            "temperature": 0.2,
-            "condition_on_previous_text": False,
-            "initial_prompt": _build_meeting_prompt(domain_hint, rolling_context),
-        },
-        {
-            "beam_size": 5,
-            "temperature": 0.4,
-            "condition_on_previous_text": False,
-            "initial_prompt": _build_meeting_prompt(domain_hint, args.prompt),
-        },
-    ]
-
-    for retry_config in retry_configs:
-        try:
-            retry_segments = worker.transcribe(
-                chunk,
-                language=args.language,
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.45,
-                    "min_speech_duration_ms": 250,
-                    "min_silence_duration_ms": 500,
-                    "speech_pad_ms": 400,
-                },
-                hallucination_silence_threshold=2.0,
-                compression_ratio_threshold=2.4,
-                no_speech_threshold=0.45,
-                log_prob_threshold=-1.0,
-                word_timestamps=True,
-                **retry_config,
-            )
-        except Exception:
-            continue
-        candidate_runs.append(retry_segments)
-
-    return max(candidate_runs, key=_score_transcription_candidate)
+    # 단일 retry: baseline이 매우 나쁘면 beam_size=8, 아니면 beam_size=5
+    avg_lp = sum(float(s.get("avg_logprob", -2)) for s in baseline_segments) / max(len(baseline_segments), 1)
+    retry_config = {
+        "beam_size": 8 if avg_lp < -1.2 else 5,
+        "temperature": 0.2,
+        "condition_on_previous_text": False,
+        "initial_prompt": _build_meeting_prompt(domain_hint, rolling_context),
+    }
+    try:
+        retry_segments = worker.transcribe(
+            chunk, language=args.language, vad_filter=True,
+            vad_parameters={"threshold": 0.45, "min_speech_duration_ms": 250,
+                           "min_silence_duration_ms": 500, "speech_pad_ms": 400},
+            hallucination_silence_threshold=2.0, compression_ratio_threshold=2.4,
+            no_speech_threshold=0.45, log_prob_threshold=-1.0, word_timestamps=True,
+            **retry_config,
+        )
+    except Exception:
+        return baseline_segments
+    return max([baseline_segments, retry_segments], key=_score_transcription_candidate)
 
 
 def _collect_live_corrections(
@@ -2420,35 +2452,64 @@ def _cmd_meeting(args):
     rolling_context = _build_meeting_prompt(_build_dynamic_domain_hint(), args.prompt)
 
     # 실시간 후처리 초기화 (녹음 중 백그라운드 교정 + 키워드 추출)
+    # 폴백 체인: gemini-2.5-flash → gemini-3-flash-preview → codex(codex_low) → ollama
     _polish_pool = None
     _correction_futures: list[tuple] = []
     _use_ollama = getattr(args, "ollama", False)
     _ollama_model = getattr(args, "ollama_model", None) or "qwen3.5:9b"
     _correct_fn = None
     _extract_kw_fn = None
+    _polish_engine = "none"
     if not args.no_polish:
-        from .polish import is_codex_available as _codex_ok, is_ollama_available as _ollama_ok
-        _has_backend = False
+        from .polish import (
+            is_codex_available as _codex_ok,
+            is_gemini_available as _gemini_ok,
+            is_ollama_available as _ollama_ok,
+            _GEMINI_MODELS,
+        )
         if _use_ollama and _ollama_ok(_ollama_model):
-            _has_backend = True
+            _polish_engine = "ollama"
+        elif _gemini_ok():
+            _polish_engine = "gemini"
         elif _codex_ok():
-            _has_backend = True
+            _polish_engine = "codex"
         elif _ollama_ok(_ollama_model):
-            _use_ollama = True
-            _has_backend = True
-            print(f"[후처리] Codex 미설치 → Ollama ({_ollama_model}) 폴백", file=sys.stderr)
-        if _has_backend:
+            _polish_engine = "ollama"
+            print(f"[후처리] Gemini/Codex 미설치 → Ollama ({_ollama_model}) 폴백", file=sys.stderr)
+
+        if _polish_engine != "none":
             from concurrent.futures import ThreadPoolExecutor as _TPE
             _polish_pool = _TPE(max_workers=2, thread_name_prefix="live-polish")
-            if _use_ollama:
-                from .polish import _correct_batch_ollama, extract_keywords_with_ollama
+
+            if _polish_engine == "gemini":
+                from .polish import _correct_batch_gemini, extract_keywords_with_gemini
+                _gemini_model_idx = 0
+                _gemini_lock = threading.Lock()
 
                 def _correct_fn(batch, idx, t=120):
-                    return _correct_batch_ollama(batch, idx, _ollama_model, t)
+                    nonlocal _gemini_model_idx
+                    with _gemini_lock:
+                        model = _GEMINI_MODELS[_gemini_model_idx]
+                    result = _correct_batch_gemini(batch, idx, model, t)
+                    if not result[1] and len(_GEMINI_MODELS) > 1:
+                        with _gemini_lock:
+                            if _gemini_model_idx == 0:
+                                _gemini_model_idx = 1
+                                fallback = _GEMINI_MODELS[1]
+                                print(f"[후처리] {model} 실패 → {fallback} 폴백", file=sys.stderr)
+                            else:
+                                fallback = _GEMINI_MODELS[_gemini_model_idx]
+                        result = _correct_batch_gemini(batch, idx, fallback, t)
+                    return result
 
                 def _extract_kw_fn(text):
-                    return extract_keywords_with_ollama(text, model=_ollama_model)
-            else:
+                    with _gemini_lock:
+                        model = _GEMINI_MODELS[_gemini_model_idx]
+                    return extract_keywords_with_gemini(text, model=model)
+
+                print(f"[후처리] 엔진: Gemini ({_GEMINI_MODELS[0]})", file=sys.stderr)
+
+            elif _polish_engine == "codex":
                 from .polish import _correct_batch, extract_keywords_with_codex
                 _work_dir = writer.output_path.parent
 
@@ -2457,6 +2518,19 @@ def _cmd_meeting(args):
 
                 def _extract_kw_fn(text):
                     return extract_keywords_with_codex(text, _work_dir)
+
+                print("[후처리] 엔진: Codex (codex_low)", file=sys.stderr)
+
+            else:  # ollama
+                from .polish import _correct_batch_ollama, extract_keywords_with_ollama
+
+                def _correct_fn(batch, idx, t=120):
+                    return _correct_batch_ollama(batch, idx, _ollama_model, t)
+
+                def _extract_kw_fn(text):
+                    return extract_keywords_with_ollama(text, model=_ollama_model)
+
+                print(f"[후처리] 엔진: Ollama ({_ollama_model})", file=sys.stderr)
 
     _capture_switch_event = get_audio_device_switch_event()
     _active_input_device = args.device
