@@ -39,7 +39,7 @@ from ..tray import MeetingTray, is_available as tray_available
 from .browser import _open_app_mode
 from .tray_adapter import start_status_poller, start_tray
 
-_BETA_MODEL_ID = "tellang/whisper-large-v3-turbo-ko"
+_BETA_MODEL_ID = "tellang/whisper-medium-ko-ct2"
 
 
 def _find_free_port() -> int:
@@ -202,7 +202,7 @@ class DesktopController:
 
             # Whisper 워커 풀 시작 (비동기 — 모델 로드는 백그라운드)
             config = get_config()
-            default_model = _BETA_MODEL_ID if self.beta_mode else "tellang/whisper-large-v3-turbo-ko"
+            default_model = _BETA_MODEL_ID if self.beta_mode else "tellang/whisper-medium-ko-ct2"
             model_id = config.get("model", default_model)
             language = config.get("language", "ko")
             chunk_seconds: float = float(config.get("chunk", 5.0))

@@ -277,7 +277,7 @@ def _install_media_extras() -> tuple[bool, str]:
 
 def _verify_model() -> tuple[bool, str]:
     """기본 Whisper 모델 접근 가능 여부 확인."""
-    model_id = "tellang/whisper-large-v3-turbo-ko"
+    model_id = "tellang/whisper-medium-ko-ct2"
     try:
         from faster_whisper.utils import download_model
 
@@ -320,7 +320,7 @@ _SETUP_ITEMS: list[dict[str, Any]] = [
     },
     {
         "key": "model",
-        "label": "Whisper 모델 (tellang/whisper-large-v3-turbo-ko)",
+        "label": "Whisper 모델 (tellang/whisper-medium-ko-ct2)",
         "installer": _verify_model,
         "category": "core",
         "required": True,

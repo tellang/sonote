@@ -57,7 +57,9 @@ _CODE_REASON_MAP: dict[str, str] = {
 }
 
 _BETA_ENV_KEY = "SONOTE_BETA"
-_BETA_MODEL_ID = "tellang/whisper-large-v3-turbo-ko"
+_BETA_MODEL_ID = "tellang/whisper-medium-ko-ct2"
+# v2.2.0: seastar105/whisper-medium-ko-zeroth → CT2 변환 → tellang/whisper-medium-ko-ct2
+_DEFAULT_MODEL_ID = "tellang/whisper-medium-ko-ct2"
 
 
 def _is_beta_mode_enabled(args: argparse.Namespace) -> bool:
@@ -537,7 +539,7 @@ def main():
     p_trans = subparsers.add_parser("transcribe", help="로컬 오디오 파일 변환")
     p_trans.add_argument("audio", help="오디오 파일 경로 (WAV, MP3 등)")
     p_trans.add_argument("-o", "--output", help="출력 파일 경로 (기본: 입력파일_transcript.txt)")
-    p_trans.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델 (기본: large-v3-turbo)")
+    p_trans.add_argument("-m", "--model", default=_DEFAULT_MODEL_ID, help="Whisper 모델 (기본: seastar105/medium-ko)")
     p_trans.add_argument("-l", "--language", default="ko", help="언어 코드 (기본: ko)")
     p_trans.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_trans.add_argument("--fmt", choices=["txt", "srt"], default="txt", help="출력 형식 (기본: txt)")
@@ -557,7 +559,7 @@ def main():
     p_live.add_argument("-o", "--output", help="출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)")
     p_live.add_argument("-b", "--back", type=int, default=0, help="N분 전부터 시작 (기본: 0=현재)")
     p_live.add_argument("-d", "--duration", type=int, default=50, help="녹음 시간(분) (기본: 50)")
-    p_live.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델")
+    p_live.add_argument("-m", "--model", default=_DEFAULT_MODEL_ID, help="Whisper 모델")
     p_live.add_argument("-l", "--language", default="ko", help="언어 코드")
     p_live.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_live.add_argument(
@@ -629,7 +631,7 @@ def main():
     )
     p_smart.add_argument("url", help="YouTube URL")
     p_smart.add_argument("-o", "--output", default=None, help="출력 디렉토리 (기본: output/transcripts/YYYY-MM-DD/)")
-    p_smart.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델")
+    p_smart.add_argument("-m", "--model", default=_DEFAULT_MODEL_ID, help="Whisper 모델")
     p_smart.add_argument("-l", "--language", default="ko", help="언어 코드")
     p_smart.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_smart.add_argument(
@@ -763,7 +765,7 @@ def main():
     p_meeting.add_argument("--list-devices", action="store_true", help="사용 가능한 마이크 목록 출력")
     p_meeting.add_argument("--profiles", help="화자 프로필 JSON (enroll로 생성, 화자 분리 정확도 향상)")
     p_meeting.add_argument("--auto-update", action="store_true", help="회의 종료 시 승인 대기 프로필 스냅샷 생성")
-    p_meeting.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델 (기본: large-v3-turbo)")
+    p_meeting.add_argument("-m", "--model", default=_DEFAULT_MODEL_ID, help="Whisper 모델 (기본: large-v3-turbo)")
     p_meeting.add_argument("-l", "--language", default="ko", help="언어 코드 (기본: ko)")
     p_meeting.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     p_meeting.add_argument(
@@ -912,7 +914,7 @@ def main():
     _p_smart_old = subparsers.add_parser("smart", help="[deprecated] auto를 사용하세요")
     _p_smart_old.add_argument("url", help="YouTube URL")
     _p_smart_old.add_argument("-o", "--output", default=None, help="출력 디렉토리")
-    _p_smart_old.add_argument("-m", "--model", default="tellang/whisper-large-v3-turbo-ko", help="Whisper 모델")
+    _p_smart_old.add_argument("-m", "--model", default=_DEFAULT_MODEL_ID, help="Whisper 모델")
     _p_smart_old.add_argument("-l", "--language", default="ko", help="언어 코드")
     _p_smart_old.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
     _p_smart_old.add_argument(
@@ -1216,7 +1218,7 @@ def _cmd_dry_run(args: argparse.Namespace) -> None:
 
     config: dict[str, Any] = {
         "command": args.command,
-        "model": getattr(args, "model", "tellang/whisper-large-v3-turbo-ko"),
+        "model": getattr(args, "model", _DEFAULT_MODEL_ID),
         "language": getattr(args, "language", "ko"),
         "device": device,
         "compute_type": compute_type,

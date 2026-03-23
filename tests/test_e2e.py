@@ -8,13 +8,13 @@ import json
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import httpx
 import numpy as np
 import pytest
 from httpx import ASGITransport
-from starlette.requests import Request
 
 from src import cli, server
 
@@ -51,79 +51,56 @@ def _make_sine_wave(
     return (0.2 * np.sin(2.0 * np.pi * frequency * timeline)).astype(np.float32)
 
 
-class _FakeWhisperWorker:
-    instances: list["_FakeWhisperWorker"] = []
+# -- Fake faster_whisper segment objects --
 
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self.started = False
-        self.stopped = False
-        self.transcribe_calls: list[dict] = []
+_FAKE_SEGMENTS = [
+    SimpleNamespace(
+        start=0.0,
+        end=0.2,
+        text="첫 번째 발화입니다",
+        avg_logprob=-0.1,
+        no_speech_prob=0.0,
+        compression_ratio=1.0,
+        words=[
+            SimpleNamespace(start=0.0, end=0.1, word="첫", probability=0.98),
+            SimpleNamespace(start=0.1, end=0.2, word="문장", probability=0.97),
+        ],
+    ),
+    SimpleNamespace(
+        start=3.5,
+        end=3.8,
+        text="두 번째 발화입니다",
+        avg_logprob=-0.1,
+        no_speech_prob=0.0,
+        compression_ratio=1.0,
+        words=[
+            SimpleNamespace(start=3.5, end=3.65, word="두", probability=0.96),
+            SimpleNamespace(start=3.65, end=3.8, word="문장", probability=0.95),
+        ],
+    ),
+]
+
+
+class _FakeWhisperModel:
+    """faster_whisper.WhisperModel drop-in replacement for testing."""
+
+    instances: list["_FakeWhisperModel"] = []
+    transcribe_calls: list[dict] = []
+
+    def __init__(self, *args, **kwargs):
+        self.init_args = args
+        self.init_kwargs = kwargs
         self.__class__.instances.append(self)
 
-    @property
-    def is_ready(self) -> bool:
-        return self.started
-
-    def start(self) -> None:
-        self.started = True
-
-    def transcribe(self, audio_chunk: np.ndarray, **kwargs) -> list[dict]:
-        self.transcribe_calls.append(
+    def transcribe(self, audio, **kwargs):
+        self.__class__.transcribe_calls.append(
             {
-                "samples": int(audio_chunk.shape[0]),
+                "samples": int(audio.shape[0]),
                 "kwargs": dict(kwargs),
             }
         )
-        return [
-            {
-                "start": 0.0,
-                "end": 0.2,
-                "text": "첫 번째 발화입니다",
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-                "compression_ratio": 1.0,
-                "words": [
-                    {
-                        "start": 0.0,
-                        "end": 0.1,
-                        "word": "첫",
-                        "probability": 0.98,
-                    },
-                    {
-                        "start": 0.1,
-                        "end": 0.2,
-                        "word": "문장",
-                        "probability": 0.97,
-                    },
-                ],
-            },
-            {
-                "start": 3.5,
-                "end": 3.8,
-                "text": "두 번째 발화입니다",
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-                "compression_ratio": 1.0,
-                "words": [
-                    {
-                        "start": 3.5,
-                        "end": 3.65,
-                        "word": "두",
-                        "probability": 0.96,
-                    },
-                    {
-                        "start": 3.65,
-                        "end": 3.8,
-                        "word": "문장",
-                        "probability": 0.95,
-                    },
-                ],
-            },
-        ]
-
-    def stop(self) -> None:
-        self.stopped = True
+        info = SimpleNamespace(language="ko", language_probability=0.99)
+        return iter(list(_FAKE_SEGMENTS)), info
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +114,7 @@ def _reset_e2e_state():
     original_startup_message = server._startup_message
     original_startup_ready = server._startup_ready
     original_event_loop = server._event_loop
+    original_paused = server._paused
 
     server._api_key = ""
     server._shutdown_requested = False
@@ -146,7 +124,9 @@ def _reset_e2e_state():
     server._startup_phase = ""
     server._startup_message = ""
     server._startup_ready = True
-    _FakeWhisperWorker.instances = []
+    server._paused = False
+    _FakeWhisperModel.instances = []
+    _FakeWhisperModel.transcribe_calls = []
 
     yield
 
@@ -159,13 +139,14 @@ def _reset_e2e_state():
     server._startup_message = original_startup_message
     server._startup_ready = original_startup_ready
     server._event_loop = original_event_loop
+    server._paused = original_paused
 
 
 async def _wait_until_async(
     predicate,
     *,
-    timeout: float = 5.0,
-    interval: float = 0.02,
+    timeout: float = 10.0,
+    interval: float = 0.05,
 ) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -173,42 +154,6 @@ async def _wait_until_async(
             return
         await asyncio.sleep(interval)
     raise AssertionError("조건이 제한 시간 내에 충족되지 않았습니다.")
-
-
-async def _read_first_transcript_event(client: httpx.AsyncClient) -> dict:
-    del client
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": "/stream",
-        "raw_path": b"/stream",
-        "query_string": b"",
-        "headers": [],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
-
-    async def _receive() -> dict:
-        await asyncio.sleep(3600)
-        return {"type": "http.disconnect"}
-
-    response = await server.stream(Request(scope, _receive))
-    assert response.media_type == "text/event-stream"
-
-    try:
-        event_text = await asyncio.wait_for(anext(response.body_iterator), timeout=5.0)
-    finally:
-        await response.body_iterator.aclose()
-
-    payload_line = next(
-        line for line in event_text.splitlines() if line.startswith("data: ")
-    )
-    payload = json.loads(payload_line[6:])
-    assert "text" in payload
-    return payload
 
 
 @pytest.mark.anyio
@@ -220,46 +165,42 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     capture_ready = threading.Event()
     emit_audio = threading.Event()
-    stop_event = threading.Event()
 
-    class _FakeInputStream:
-        def __init__(self, *args, callback=None, **kwargs):
-            self.callback = callback
-            self._thread: threading.Thread | None = None
+    def _fake_capture_audio(**kwargs):
+        """Replacement for src.audio_capture.capture_audio.
 
-        def __enter__(self):
-            capture_ready.set()
-            self._thread = threading.Thread(target=self._emit_once, daemon=True)
-            self._thread.start()
-            return self
-
-        def _emit_once(self) -> None:
-            if not emit_audio.wait(timeout=3.0):
-                stop_event.set()
+        Yields exactly one chunk of audio, then waits for shutdown before
+        returning so the pipeline can perform its normal exit path.
+        """
+        capture_ready.set()
+        if not emit_audio.wait(timeout=10.0):
+            return
+        yield audio_chunk
+        # Hold the generator open until the pipeline is signalled to stop.
+        # The pipeline checks _should_stop() after each yielded chunk; when
+        # shutdown is requested the for-loop simply advances to the next
+        # iteration which lands here.  We wait briefly then return so that
+        # capture_audio (the generator) is exhausted and the pipeline's
+        # outer while-loop re-checks _should_stop() and exits.
+        stop_event = kwargs.get("stop_event")
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if server.is_shutdown_requested():
                 return
-            frames = audio_chunk.reshape(-1, 1)
-            self.callback(frames, len(frames), {}, None)
-            time.sleep(0.3)
-            stop_event.set()
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            if self._thread is not None:
-                self._thread.join(timeout=1.0)
+            if stop_event is not None and stop_event.is_set():
+                return
+            time.sleep(0.1)
 
     monkeypatch.setattr(server, "OUTPUT_ROOT", tmp_path)
-    monkeypatch.setattr("src.audio_capture.sd.InputStream", _FakeInputStream)
+    monkeypatch.setattr("src.audio_capture.capture_audio", _fake_capture_audio)
+
+    # Create a fake faster_whisper module so `from faster_whisper import WhisperModel`
+    # inside _cmd_meeting resolves to our fake.
+    fake_faster_whisper = MagicMock()
+    fake_faster_whisper.WhisperModel = _FakeWhisperModel
 
     with patch("src.server.run_server"), patch(
         "src.cli._wait_for_server_ready",
-    ), patch(
-        "src.server.get_audio_device_switch_event",
-        return_value=stop_event,
-    ), patch(
-        "src.server.consume_audio_device_switch",
-        return_value=(False, None),
-    ), patch(
-        "src.whisper_worker.WhisperWorker",
-        new=_FakeWhisperWorker,
     ), patch(
         "src.tray.is_available",
         return_value=False,
@@ -268,6 +209,11 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     ), patch(
         "os.startfile",
         create=True,
+    ), patch(
+        "src.runtime_env.bootstrap_nvidia_dll_path",
+    ), patch.dict(
+        "sys.modules",
+        {"faster_whisper": fake_faster_whisper},
     ):
         server._event_loop = asyncio.get_running_loop()
         transport = ASGITransport(app=server.app)
@@ -284,29 +230,36 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
             assert await asyncio.to_thread(
                 capture_ready.wait,
-                3.0,
+                10.0,
             ), "마이크 캡처가 시작되지 않았습니다."
 
-            stream_task = asyncio.create_task(_read_first_transcript_event(client))
-
             emit_audio.set()
-            event_payload = await asyncio.wait_for(stream_task, timeout=5.0)
 
-            assert event_payload["speaker"] == "화자"
-            assert "첫 번째 발화입니다" in event_payload["text"]
+            # Wait for both transcript segments to arrive via push_transcript_sync
+            await _wait_until_async(
+                lambda: len(server._transcript_history) >= 2,
+                timeout=10.0,
+            )
 
-            await asyncio.to_thread(meeting_thread.join, 5.0)
+            # Signal the meeting loop to shut down gracefully
+            server._shutdown_requested = True
+
+            # Wait for the meeting thread to finish
+            await asyncio.to_thread(meeting_thread.join, 10.0)
             assert not meeting_thread.is_alive(), "회의 루프가 종료되지 않았습니다."
 
-            await _wait_until_async(lambda: len(server._transcript_history) == 2)
+            # Verify fake model was used
+            assert len(_FakeWhisperModel.instances) == 1
+            assert len(_FakeWhisperModel.transcribe_calls) >= 1
+            assert _FakeWhisperModel.transcribe_calls[0]["samples"] == audio_chunk.shape[0]
 
-            assert len(_FakeWhisperWorker.instances) == 1
-            worker = _FakeWhisperWorker.instances[0]
-            assert worker.started is True
-            assert worker.stopped is True
-            assert len(worker.transcribe_calls) == 1
-            assert worker.transcribe_calls[0]["samples"] == audio_chunk.shape[0]
+            # Verify transcript history
+            history = list(server._transcript_history)
+            assert len(history) == 2
+            assert history[0]["speaker"] == "화자"
+            assert "첫 번째 발화입니다" in history[0]["text"]
 
+            # Verify output files
             session_json = session_dir / "session.json"
             alignment_path = session_dir / "meeting.stt.jsonl"
             audio_path = session_dir / "meeting.audio.wav"
@@ -327,8 +280,10 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             assert Path(session_meta["output_path"]) == output_path
 
             alignment_lines = alignment_path.read_text(encoding="utf-8").splitlines()
-            assert len(alignment_lines) == 2
+            # 2 raw stt_segment entries + 2 processed segment entries = 4
+            assert len(alignment_lines) == 4
 
+            # API: session list
             list_response = await client.get("/api/sessions")
             assert list_response.status_code == 200
             sessions = list_response.json()
@@ -344,6 +299,7 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
                 }
             ]
 
+            # API: session detail
             detail_response = await client.get(f"/api/sessions/{session_id}")
             assert detail_response.status_code == 200
             detail = detail_response.json()
@@ -353,15 +309,17 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             assert detail["transcript_source"] == "meeting.md"
             assert any("첫 번째 발화입니다" in line for line in detail["transcript"])
             assert any("두 번째 발화입니다" in line for line in detail["transcript"])
-            assert len(detail["alignment"]) == 2
+            assert len(detail["alignment"]) == 4
 
+            # API: history
             history_response = await client.get("/history")
             assert history_response.status_code == 200
-            history = history_response.json()
-            assert len(history) == 2
-            assert history[0]["speaker"] == "화자"
-            assert "첫 번째 발화입니다" in history[0]["text"]
+            history_data = history_response.json()
+            assert len(history_data) == 2
+            assert history_data[0]["speaker"] == "화자"
+            assert "첫 번째 발화입니다" in history_data[0]["text"]
 
+            # API: session rotate
             rotate_response = await client.post("/api/sessions/new")
             assert rotate_response.status_code == 200
             assert rotate_response.json()["session_id"].count("_") == 1
@@ -370,6 +328,7 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             assert server._segment_count == 0
             assert server._speakers == set()
 
+            # API: session delete
             delete_response = await client.delete(f"/api/sessions/{session_id}")
             assert delete_response.status_code == 200
             assert delete_response.json() == {

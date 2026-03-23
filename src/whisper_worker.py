@@ -326,7 +326,7 @@ class WhisperWorker:
 
     def __init__(
         self,
-        model_id: str = "tellang/whisper-large-v3-turbo-ko",
+        model_id: str = "tellang/whisper-medium-ko-ct2",
         language: str = "ko",
         device: str = "cuda",
         compute_type: str = "float16",
@@ -460,7 +460,7 @@ class WhisperWorkerPool:
 
     def __init__(
         self,
-        model_id: str = "tellang/whisper-large-v3-turbo-ko",
+        model_id: str = "tellang/whisper-medium-ko-ct2",
         language: str = "ko",
         device: str = "cuda",
         compute_type: str = "float16",

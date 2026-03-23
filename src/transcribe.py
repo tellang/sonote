@@ -48,6 +48,7 @@ DOMAIN_PROMPT = (
 # ---------------------------------------------------------------------------
 _cuda_exit_registered = False
 _cuda_exit_enabled = True
+_cuda_model_ref = None  # CUDA 모델 참조 유지 — 함수 리턴 후 GC 방지, os._exit(0)으로 정리
 
 
 def _register_cuda_exit_guard() -> None:
@@ -77,7 +78,7 @@ def disable_cuda_exit_guard() -> None:
     _cuda_exit_enabled = False
 def transcribe_audio(
     audio_path: str | Path,
-    model_id: str = "tellang/whisper-large-v3-turbo-ko",
+    model_id: str = "tellang/whisper-medium-ko-ct2",
     language: str = "ko",
     device: str | None = None,
     compute_type: str | None = None,
@@ -217,7 +218,7 @@ def split_audio(
 def transcribe_chunks(
     audio_path: str | Path,
     chunk_minutes: int = 10,
-    model_id: str = "tellang/whisper-large-v3-turbo-ko",
+    model_id: str = "tellang/whisper-medium-ko-ct2",
     language: str = "ko",
     device: str | None = None,
     compute_type: str | None = None,
@@ -300,6 +301,12 @@ def transcribe_chunks(
     # 청크 임시 파일 정리
     chunk_dir = chunks[0].parent
     _shutil.rmtree(chunk_dir, ignore_errors=True)
+
+    # CUDA 모델을 모듈 레벨에 보관 — 함수 리턴 시 GC 소멸자 abort 방지
+    # atexit의 os._exit(0)이 Python 정리 단계를 건너뛰어 안전하게 종료
+    if device == "cuda":
+        global _cuda_model_ref
+        _cuda_model_ref = model
 
     print(f"\n[완료] 총 {len(all_segments)}개 세그먼트")
     return all_segments

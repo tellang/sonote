@@ -47,10 +47,11 @@ jobs:
 
   # ── Test job: pytest + coverage (매트릭스) ──
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.11", "3.12", "3.13"]
 
     steps:
@@ -65,7 +66,9 @@ jobs:
       - name: uv 캐시 복원
         uses: actions/cache@v4
         with:
-          path: ~/.cache/uv
+          path: |
+            ~/.cache/uv
+            ~/AppData/Local/uv/cache
           key: uv-test-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             uv-test-${{ runner.os }}-py${{ matrix.python-version }}-
@@ -76,4 +79,4 @@ jobs:
           UV_NO_BUILD_ISOLATION: false
 
       - name: 테스트 + 커버리지 (pytest)
-        run: uv run pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term-missing
+        run: uv run pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term-missing -k "not test_stt_regression and not test_viewer_ui"

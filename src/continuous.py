@@ -130,7 +130,7 @@ def continuous_live(
     video_url: str,
     output_path: str | Path,
     chunk_seconds: int = 10,
-    model_id: str = "tellang/whisper-large-v3-turbo-ko",
+    model_id: str = "tellang/whisper-medium-ko-ct2",
     language: str = "ko",
     device: str | None = None,
     compute_type: str | None = None,
