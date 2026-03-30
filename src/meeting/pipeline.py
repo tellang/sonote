@@ -79,6 +79,7 @@ class PipelineAdapter:
     correction_batch_size: int = 10
     correction_line_formatter: Callable[[str, str, str], str] | None = None
     submit_keyword_job: Callable[[str], None] | None = None
+    on_keyword_submitted: Callable[[str, int], None] | None = None
     keyword_every_segments: int = 10
     keyword_window: int = 10
     on_capture_error: Callable[[Exception, int | None, int], tuple[int | None, bool]] | None = None
@@ -302,12 +303,20 @@ class TranscriptionPipeline:
                     }
                 )
 
+            avg_logprob = seg.get("avg_logprob")
+            confidence = (
+                round(max(0.0, min(1.0, 1.0 + avg_logprob)), 3)
+                if avg_logprob is not None
+                else None
+            )
+
             raw_segments.append(
                 Segment(
                     speaker=speaker,
                     text=text,
                     start=start,
                     end=end,
+                    confidence=confidence,
                 )
             )
         return raw_segments
@@ -366,6 +375,8 @@ class TranscriptionPipeline:
                 "end": segment.end,
                 "feedback_text": stripped,
             }
+            if segment.confidence is not None:
+                payload["confidence"] = segment.confidence
             self._context.on_transcript(payload)
             self._segment_count += 1
 
@@ -442,7 +453,16 @@ class TranscriptionPipeline:
         window = max(1, self._adapter.keyword_window)
         kw_text = " ".join(self._recent_feedback_texts[-window:])
         if kw_text.strip():
-            submit_fn(kw_text)
+            try:
+                submit_fn(kw_text)
+            except Exception as exc:
+                print(f"[pipeline][keyword] submit 실패: {exc}", file=sys.stderr)
+                return
+            if self._adapter.on_keyword_submitted is not None:
+                try:
+                    self._adapter.on_keyword_submitted(kw_text, self._segment_count)
+                except Exception as exc:
+                    print(f"[pipeline][keyword] callback 실패: {exc}", file=sys.stderr)
 
     def _format_correction_line(self, timestamp: str, speaker: str, text: str) -> str:
         formatter = self._adapter.correction_line_formatter

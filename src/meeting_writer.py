@@ -50,6 +50,7 @@ class MeetingWriter:
         self._speakers: set[str] = set()
         self._segments: list[dict[str, Any]] = []
         self._artifacts: dict[str, str] = {}
+        self._keywords: dict[str, Any] | None = None
         self._footer_written: bool = False
 
         self._raw_file = self._raw_path.open("a", encoding="utf-8")
@@ -74,6 +75,10 @@ class MeetingWriter:
         started_text = self._started_at.strftime("%Y-%m-%d %H:%M:%S")
         self._raw_file.write(f"# started: {started_text}\n")
         self._raw_file.flush()
+
+    def set_keywords(self, keywords: dict[str, Any]) -> None:
+        """세션 종료 시 session.json에 포함할 키워드 스냅샷을 저장한다."""
+        self._keywords = keywords
 
     def set_artifact(self, name: str, path: Path | str | None) -> None:
         if not path:
@@ -248,7 +253,13 @@ class MeetingWriter:
             applied += 1
         return applied
 
-    def write_session_json(self, duration: Any, segments_count: int, speakers: Any) -> None:
+    def write_session_json(
+        self,
+        duration: Any,
+        segments_count: int,
+        speakers: Any,
+        keywords: dict[str, Any] | None = None,
+    ) -> None:
         ended_at = datetime.now()
         speaker_list = self._normalize_speakers(speakers)
         duration_seconds = self._coerce_duration_seconds(duration)
@@ -271,6 +282,9 @@ class MeetingWriter:
         }
         if duration_text is not None:
             payload["duration_text"] = duration_text
+        kw = keywords or self._keywords
+        if kw:
+            payload["keywords"] = kw
 
         try:
             self._session_path.write_text(

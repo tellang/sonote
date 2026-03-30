@@ -302,7 +302,7 @@ class DesktopController:
         from ..server import _current_audio_device
 
         def _on_transcript(payload: dict[str, Any]) -> None:
-            push_transcript_sync(payload["speaker"], payload["text"], payload["timestamp"])
+            push_transcript_sync(payload["speaker"], payload["text"], payload["timestamp"], confidence=payload.get("confidence"))
             if self._writer is not None:
                 self._writer.append_segment(
                     payload["speaker"],

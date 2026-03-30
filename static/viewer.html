@@ -1068,6 +1068,34 @@
             to { transform: translateX(100%); }
         }
 
+        /* === 컨트롤 패널 컴팩트 모드 === */
+        #control-collapse-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 2px 0;
+            background: transparent;
+            border: none;
+            color: var(--text-tertiary);
+            cursor: pointer;
+            font-size: 10px;
+            opacity: 0.5;
+            transition: opacity var(--dur-fast);
+        }
+        #control-collapse-btn:hover { opacity: 1; }
+
+        .page.controls-collapsed #status-bar .status-group-device,
+        .page.controls-collapsed #status-bar .status-group:last-child,
+        .page.controls-collapsed #keyword-section,
+        .page.controls-collapsed #enroll-panel {
+            display: none !important;
+        }
+        .page.controls-collapsed #status-bar {
+            padding: 6px 16px;
+            gap: 8px;
+        }
+
         /* === 키워드 섹션 === */
         #keyword-section {
             margin-bottom: 4px;
@@ -3107,6 +3135,10 @@
             </div>
         </div>
 
+        <button id="control-collapse-btn" onclick="toggleControlPanel()" title="컨트롤 패널 접기/펼치기" aria-label="컨트롤 패널 접기/펼치기">
+            <span id="control-collapse-icon">▲ 접기</span>
+        </button>
+
         <div id="transcript" class="glass" aria-label="실시간 자막 영역">
             <div class="onboarding-card" id="empty-state">
                 <span class="onboarding-icon" aria-hidden="true">&#x1F399;</span>
@@ -4019,6 +4051,20 @@
                 transcriptEl.appendChild(emptyDiv);
             }
 
+            // 세션별 키워드 렌더링
+            if (data.keywords && Object.keys(data.keywords).length > 0) {
+                const kw = data.keywords;
+                const all = [].concat(kw.manual || [], kw.promoted || [], kw.extracted || []);
+                renderKeywordChips({
+                    keywords: all,
+                    manual: kw.manual || [],
+                    promoted: kw.promoted || [],
+                    extracted: kw.extracted || [],
+                });
+            } else {
+                renderKeywordChips({ keywords: [], manual: [], promoted: [], extracted: [] });
+            }
+
             // 배너 표시
             const date = parseSessionDate(data);
             const timeStr = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
@@ -4078,6 +4124,9 @@
             // 메인 전사 영역 비우기 + 온보딩 카드 복원
             transcriptEl.innerHTML = '<div class="onboarding-card" id="empty-state"><span class="onboarding-icon" aria-hidden="true">&#x1F399;</span><div class="onboarding-title">회의 전사 준비</div><div class="onboarding-desc">마이크를 선택하고 녹음을 시작하세요</div><div class="onboarding-steps"><div class="onboarding-step"><span class="onboarding-step-num">1</span><span>상단에서 마이크 장치를 선택합니다</span></div><div class="onboarding-step"><span class="onboarding-step-num">2</span><span>서버가 준비되면 자동으로 녹음이 시작됩니다</span></div><div class="onboarding-step"><span class="onboarding-step-num">3</span><span>실시간 전사 결과가 여기에 표시됩니다</span></div></div></div>';
 
+            // 라이브 키워드 리로드
+            loadKeywords();
+
             // 히스토리 재로드 + SSE 재연결
             globalSegmentIndex = 0;
             loadHistory().finally(() => {
@@ -4114,6 +4163,9 @@
                 AppState.currentSessionId = null;
                 historyBanner.classList.remove("visible");
                 returnLiveBtn.classList.remove("visible");
+
+                // 키워드 칩 초기화 (서버에서 SSE로도 오지만 즉시 반영)
+                renderKeywordChips({ keywords: [], manual: [], promoted: [], extracted: [] });
 
                 // 세션 목록 갱신 (즉시 + 지연 재시도 — 캡처 루프의 세션 회전 처리 대기)
                 await loadSessionList();
@@ -5349,6 +5401,19 @@
             } catch (e) { /* 무시 */ }
         }
 
+        function toggleControlPanel() {
+            const page = document.querySelector(".page");
+            const collapsed = page.classList.toggle("controls-collapsed");
+            const icon = document.getElementById("control-collapse-icon");
+            icon.textContent = collapsed ? "\u25BC \uD3BC\uCE58\uAE30" : "\u25B2 \uC811\uAE30";
+            localStorage.setItem("controlsCollapsed", collapsed ? "1" : "");
+        }
+        // 초기 상태 복원
+        if (localStorage.getItem("controlsCollapsed") === "1") {
+            document.querySelector(".page").classList.add("controls-collapsed");
+            document.getElementById("control-collapse-icon").textContent = "\u25BC \uD3BC\uCE58\uAE30";
+        }
+
         function toggleKeywords() {
             const body = document.getElementById("keyword-body");
             const arrow = document.getElementById("keyword-arrow");
@@ -5499,6 +5564,8 @@
                         }
                     } else if (msgType === "polish_progress") {
                         updateSessionProgress(msg);
+                    } else if (msgType === "keywords_updated") {
+                        if (AppState.currentView === "live") renderKeywordChips(msg);
                     } else if (msgType === "session_created" || msgType === "session_updated") {
                         loadSessionList();
                     } else if (msgType === "session_deleted") {
@@ -5689,6 +5756,14 @@
                 try {
                     const data = JSON.parse(event.data);
                     updateSessionProgress(data);
+                } catch (e) { /* 파싱 오류 무시 */ }
+            });
+
+            // 키워드 실시간 갱신
+            source.addEventListener("keywords_updated", (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (AppState.currentView === "live") renderKeywordChips(data);
                 } catch (e) { /* 파싱 오류 무시 */ }
             });
 

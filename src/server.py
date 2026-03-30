@@ -193,6 +193,7 @@ UnknownSpeakerTracker = _impl.UnknownSpeakerTracker
 _unknown_tracker = _impl._unknown_tracker
 
 add_extracted_keywords = _impl.add_extracted_keywords
+get_keywords_snapshot = _impl.get_keywords_snapshot
 push_transcript = _impl.push_transcript
 push_transcript_sync = _impl.push_transcript_sync
 push_correction = _impl.push_correction

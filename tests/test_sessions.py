@@ -142,9 +142,10 @@ class TestListSessions:
     @pytest.mark.asyncio
     async def test_sorted_newest_first(self, tmp_path, monkeypatch, client):
         """최신 세션이 먼저 반환된다."""
-        _create_session_dir(tmp_path, "2026-03-10", "090000", meeting_lines=[])
-        _create_session_dir(tmp_path, "2026-03-13", "143022", meeting_lines=[])
-        _create_session_dir(tmp_path, "2026-03-12", "120000", meeting_lines=[])
+        _seg = ["- [00:00:01] A: test"]
+        _create_session_dir(tmp_path, "2026-03-10", "090000", meeting_lines=_seg)
+        _create_session_dir(tmp_path, "2026-03-13", "143022", meeting_lines=_seg)
+        _create_session_dir(tmp_path, "2026-03-12", "120000", meeting_lines=_seg)
         monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
 
         response = await client.get("/api/sessions")
@@ -160,7 +161,7 @@ class TestListSessions:
         """meetings 아래 파일은 무시하고 디렉토리만 스캔한다."""
         (tmp_path / "meetings").mkdir(parents=True)
         (tmp_path / "meetings" / "readme.txt").write_text("ignore me")
-        _create_session_dir(tmp_path, "2026-03-13", "100000", meeting_lines=[])
+        _create_session_dir(tmp_path, "2026-03-13", "100000", meeting_lines=["- [00:00:01] A: test"])
         monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
 
         response = await client.get("/api/sessions")

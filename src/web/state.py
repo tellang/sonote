@@ -153,3 +153,10 @@ class ServerState:
         self.segment_count = 0
         self.speakers.clear()
         self.start_time = time.time()
+        # 키워드 상태 초기화 (세션 간 오염 방지)
+        with self.kw_lock:
+            self.manual_keywords.clear()
+            self.extracted_keywords.clear()
+            self.promoted_keywords.clear()
+            self.blocked_keywords.clear()
+            self.keyword_seen_counts.clear()

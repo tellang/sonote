@@ -2262,6 +2262,7 @@ def _cmd_meeting(args):
         set_startup_status,
         consume_session_rotate,
         set_session_rotate_callback,
+        get_keywords_snapshot,
     )
     from .meeting import PipelineAdapter, PipelineContext, run_capture_loop
     from .meeting_writer import MeetingWriter
@@ -2430,6 +2431,7 @@ def _cmd_meeting(args):
         duration = time.time() - start_time
         duration_str = time.strftime("%H:%M:%S", time.gmtime(duration))
         speaker_count = diarizer.get_speaker_count() if diarizer else 1
+        writer.set_keywords(get_keywords_snapshot())
         write_session_json = getattr(writer, "write_session_json", None)
         if callable(write_session_json):
             write_session_json(duration, segment_count, speaker_count)
@@ -2650,7 +2652,7 @@ def _cmd_meeting(args):
         writer.append_alignment(alignment_payload)
 
     def _on_transcript(payload: dict[str, Any]) -> None:
-        push_transcript_sync(payload["speaker"], payload["text"], payload["timestamp"])
+        push_transcript_sync(payload["speaker"], payload["text"], payload["timestamp"], confidence=payload.get("confidence"))
         writer.append_segment(
             payload["speaker"],
             payload["text"],

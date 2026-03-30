@@ -81,6 +81,7 @@ _STATE_COMPAT_ATTRS: dict[str, str] = {
 _SESSION_ID_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}")
 _SESSION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SESSION_TIME_RE = re.compile(r"\d{6}")
+_RAW_DATA_HEADING_RE = re.compile(r"^#{1,6}\s*Raw Data\s*$", re.IGNORECASE)
 
 # 자동 등록 후보 판별에 필요한 최소 세그먼트 수
 _AUTO_REGISTER_MIN_SEGMENTS = 5
@@ -496,20 +497,43 @@ def _keyword_payload() -> dict:
     }
 
 
+def get_keywords_snapshot() -> dict:
+    """현재 키워드 상태의 직렬화 가능한 스냅샷을 반환한다 (session.json 저장용)."""
+    with _server_state.kw_lock:
+        return {
+            "manual": sorted(_server_state.manual_keywords),
+            "extracted": sorted(_server_state.extracted_keywords),
+            "promoted": sorted(_server_state.promoted_keywords),
+            "blocked": sorted(_server_state.blocked_keywords),
+        }
+
+
 def add_extracted_keywords(keywords: list[str], promote_threshold: int = 2) -> dict:
     """자동 추출 키워드를 누적하고 반복 확인된 것만 승격한다."""
+    changed = False
     with _server_state.kw_lock:
         for raw in keywords:
             keyword = _normalize_keyword(raw)
             if not keyword or keyword in _server_state.blocked_keywords or keyword in _server_state.manual_keywords:
                 continue
-            _server_state.keyword_seen_counts[keyword] = _server_state.keyword_seen_counts.get(keyword, 0) + 1
+            prev_count = _server_state.keyword_seen_counts.get(keyword, 0)
+            _server_state.keyword_seen_counts[keyword] = prev_count + 1
+            if _server_state.keyword_seen_counts[keyword] != prev_count:
+                changed = True
             if _server_state.keyword_seen_counts[keyword] >= promote_threshold:
+                if keyword not in _server_state.promoted_keywords:
+                    changed = True
                 _server_state.promoted_keywords.add(keyword)
                 _server_state.extracted_keywords.discard(keyword)
             elif keyword not in _server_state.promoted_keywords:
+                if keyword not in _server_state.extracted_keywords:
+                    changed = True
                 _server_state.extracted_keywords.add(keyword)
-    return _keyword_payload()
+        payload = _keyword_payload()
+
+    if changed:
+        _broadcast_sse_sync("keywords_updated", payload)
+    return payload
 
 
 @app.get("/")
@@ -994,6 +1018,14 @@ def _session_contains_keyword(session_dir: Path, keyword: str) -> bool:
     return False
 
 
+def _trim_meeting_md_transcript(lines: list[str]) -> list[str]:
+    """meeting.md에서 '# Raw Data' 이후 섹션을 제외한다."""
+    for idx, line in enumerate(lines):
+        if _RAW_DATA_HEADING_RE.match(line.strip()):
+            return lines[:idx]
+    return lines
+
+
 def _scan_sessions() -> list[dict]:
     """output/meetings 디렉토리를 스캔하여 세션 메타데이터 목록을 반환한다."""
     meetings_root = OUTPUT_ROOT / "meetings"
@@ -1008,6 +1040,12 @@ def _scan_sessions() -> list[dict]:
         for time_dir in date_dir.iterdir():
             if not time_dir.is_dir():
                 continue
+            try:
+                if not any(time_dir.iterdir()):
+                    # 빈 세션 디렉토리는 목록에서 제외 (중복/유령 세션 방지)
+                    continue
+            except OSError:
+                continue
             time_str = time_dir.name  # HHMMSS
             session_id = f"{date_str}_{time_str}"
 
@@ -1016,12 +1054,15 @@ def _scan_sessions() -> list[dict]:
                 # session.json이 있으면 메타데이터 사용
                 try:
                     meta = json.loads(session_json.read_text(encoding="utf-8"))
+                    seg_count = meta.get("segment_count", 0)
+                    if seg_count < 1:
+                        continue  # 세그먼트 0개 세션 숨김
                     sessions.append({
                         "id": session_id,
                         "date": date_str,
                         "time": time_str,
                         "duration": meta.get("duration", ""),
-                        "segments": meta.get("segment_count", 0),
+                        "segments": seg_count,
                         "speakers": meta.get("speaker_count", 0),
                         "path": str(time_dir),
                     })
@@ -1031,17 +1072,20 @@ def _scan_sessions() -> list[dict]:
 
             # 폴백: 디렉토리 구조 + transcript 파일에서 추출
             segment_count = 0
-            for candidate in ("meeting.md", "meeting.raw.txt"):
+            for candidate in ("meeting.md", "meeting.raw.txt", "meeting.stt.jsonl"):
                 transcript_file = time_dir / candidate
                 if transcript_file.is_file():
                     try:
                         lines = transcript_file.read_text(encoding="utf-8").splitlines()
                         segment_count = sum(
-                            1 for ln in lines if ln.startswith("- [")
+                            1 for ln in lines if ln.startswith("- [") or (candidate.endswith(".jsonl") and ln.strip())
                         )
                     except OSError:
                         pass
                     break
+
+            if segment_count < 1:
+                continue  # 세그먼트 0개 세션 숨김
 
             sessions.append({
                 "id": session_id,
@@ -1126,6 +1170,8 @@ async def get_session(request: Request, session_id: str) -> dict:
             try:
                 transcript_lines = transcript_file.read_text(encoding="utf-8").splitlines()
                 transcript_source = candidate
+                if transcript_source == "meeting.md":
+                    transcript_lines = _trim_meeting_md_transcript(transcript_lines)
             except OSError:
                 pass
             break
@@ -1138,7 +1184,13 @@ async def get_session(request: Request, session_id: str) -> dict:
             for line in alignment_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line:
-                    alignment.append(json.loads(line))
+                    entry = json.loads(line)
+                    # avg_logprob → confidence 변환 (뷰어 low-confidence 표시용)
+                    if "confidence" not in entry and "avg_logprob" in entry:
+                        lp = entry["avg_logprob"]
+                        if isinstance(lp, (int, float)):
+                            entry["confidence"] = round(max(0.0, min(1.0, 1.0 + lp)), 3)
+                    alignment.append(entry)
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -1152,6 +1204,7 @@ async def get_session(request: Request, session_id: str) -> dict:
         "transcript_source": transcript_source,
         "transcript": transcript_lines,
         "alignment": alignment,
+        "keywords": meta.get("keywords", {}),
         "meta": meta,
     }
 
@@ -1842,11 +1895,14 @@ async def new_session(request: Request) -> dict:
     _verify_api_key(request)
 
     # 콜백은 CLI 스레드에서 플래그 감지 시 실행 (async 블로킹 방지)
-    # 서버 상태 리셋
+    # 서버 상태 리셋 (키워드 포함)
     _server_state.reset_for_new_session()
 
     # 미등록 화자 임시 데이터 리셋
     _unknown_tracker.reset()
+
+    # 키워드 초기화를 뷰어에 즉시 반영
+    await _broadcast_sse("keywords_updated", _keyword_payload())
 
     # 세션 회전 플래그 설정 (CLI/desktop 루프에서 consume_session_rotate()로 감지 → 콜백 호출)
     _server_state.session_rotate_event.set()
@@ -1854,16 +1910,7 @@ async def new_session(request: Request) -> dict:
     now = datetime.now()
     new_id = now.strftime("%Y-%m-%d_%H%M%S")
 
-    # 사이드바에 표시되도록 세션 디렉토리 + session.json 생성
-    date_str = now.strftime("%Y-%m-%d")
-    time_str = now.strftime("%H%M%S")
-    session_dir = OUTPUT_ROOT / "meetings" / date_str / time_str
-    session_dir.mkdir(parents=True, exist_ok=True)
-    import json as _json
-    (session_dir / "session.json").write_text(
-        _json.dumps({"id": new_id, "created": now.isoformat(), "segments": 0, "speakers": 0}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # 세션 디렉토리는 파이프라인 회전 시 MeetingWriter가 생성 (중복 방지)
 
     return {"session_id": new_id, "message": "새 세션을 시작합니다."}
 
@@ -1933,6 +1980,7 @@ async def push_transcript(
         item["confidence"] = round(confidence, 3)
     _server_state.transcript_history.append(item)
     await _broadcast_item(item)
+    await _broadcast_sse("segment_created", item)
 
 
 async def push_correction(corrections: list[dict]) -> None:
@@ -1968,7 +2016,13 @@ async def push_correction(corrections: list[dict]) -> None:
     await _broadcast_sse("correction", {"corrections": normalized_corrections})
 
 
-def push_transcript_sync(speaker: str, text: str, timestamp: str) -> None:
+def push_transcript_sync(
+    speaker: str,
+    text: str,
+    timestamp: str,
+    *,
+    confidence: float | None = None,
+) -> None:
     """스레드 안전한 동기 래퍼 — 별도 스레드에서 SSE 큐에 push."""
 
     # status API의 세그먼트 수를 동기 호출 시점에 즉시 반영
@@ -1976,7 +2030,7 @@ def push_transcript_sync(speaker: str, text: str, timestamp: str) -> None:
 
     if _server_state.event_loop is not None and _server_state.event_loop.is_running():
         asyncio.run_coroutine_threadsafe(
-            push_transcript(speaker, text, timestamp, count_segment=False),
+            push_transcript(speaker, text, timestamp, count_segment=False, confidence=confidence),
             _server_state.event_loop,
         )
 

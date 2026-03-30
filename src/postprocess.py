@@ -38,6 +38,7 @@ class Segment:
     text: str
     start: float  # 초 단위
     end: float
+    confidence: float | None = None
 
 
 # 필러 단어 목록

@@ -572,7 +572,13 @@ def _run_gemini(
             shell=False,
         )
         if result.returncode == 0:
-            return True, result.stdout.strip()
+            # Gemini CLI stdout에 MCP 경고문이 섞여 나올 수 있음 — 인라인 제거
+            stdout = re.sub(
+                r"MCP issues detected\. Run /mcp list for status\.",
+                "",
+                result.stdout,
+            ).strip()
+            return True, stdout
         return False, result.stderr.strip() or f"exit {result.returncode}"
     except subprocess.TimeoutExpired:
         return False, f"타임아웃 ({timeout}초)"
