@@ -1980,7 +1980,6 @@ async def push_transcript(
         item["confidence"] = round(confidence, 3)
     _server_state.transcript_history.append(item)
     await _broadcast_item(item)
-    await _broadcast_sse("segment_created", item)
 
 
 async def push_correction(corrections: list[dict]) -> None:

@@ -577,6 +577,7 @@ def _run_gemini(
                 r"MCP issues detected\. Run /mcp list for status\.",
                 "",
                 result.stdout,
+                flags=re.IGNORECASE,
             ).strip()
             return True, stdout
         return False, result.stderr.strip() or f"exit {result.returncode}"

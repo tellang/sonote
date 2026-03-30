@@ -245,6 +245,27 @@ class TestBuildRawSegments:
         assert len(result) == 1
         assert result[0].speaker == "Speaker_01"
 
+    @pytest.mark.parametrize(
+        "avg_logprob, expected_confidence",
+        [
+            (None, None),
+            (0.0, 1.0),
+            (-1.0, 0.0),
+            (0.5, 1.0),
+            (-2.0, 0.0),
+        ],
+    )
+    def test_confidence_from_avg_logprob(self, avg_logprob, expected_confidence):
+        """avg_logprob → confidence 변환 경계값 테스트."""
+        seg = _good_stt_segment("경계값 테스트")
+        seg["avg_logprob"] = avg_logprob
+        with patch("src.meeting.pipeline.is_valid_segment", return_value=True), \
+             patch("src.meeting.pipeline.is_hallucination", return_value=False), \
+             patch("src.meeting.pipeline.is_looping", return_value=False):
+            segs = self._build([seg])
+        assert len(segs) == 1
+        assert segs[0].confidence == expected_confidence
+
 
 # ---------------------------------------------------------------------------
 # 4. _emit_segments
