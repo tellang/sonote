@@ -6,7 +6,6 @@ _normalize_keyword 필터링을 검증한다.
 
 import asyncio
 
-import pytest
 
 from src import server
 

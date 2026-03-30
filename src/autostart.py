@@ -5,14 +5,16 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path, PureWindowsPath
-from typing import Final
+from typing import Any, Final
 
 from .runtime.context import is_frozen
 
 try:
-    import winreg as _WINREG
+    import winreg as _winreg_module
 except ImportError:  # pragma: no cover - 비 Windows 환경 폴백
-    _WINREG = None
+    _WINREG: Any | None = None
+else:
+    _WINREG = _winreg_module
 
 APP_NAME: Final[str] = "sonote"
 RUN_KEY_PATH: Final[str] = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
@@ -43,16 +45,17 @@ def get_exe_path() -> str:
 def register() -> None:
     """현재 실행 경로를 Windows 자동 시작에 등록한다."""
     _ensure_windows()
+    winreg = _require_winreg()
     command = _build_launch_command()
 
     try:
-        with _WINREG.CreateKeyEx(
-            _WINREG.HKEY_CURRENT_USER,
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
             RUN_KEY_PATH,
             0,
-            _WINREG.KEY_SET_VALUE,
+            winreg.KEY_SET_VALUE,
         ) as key:
-            _WINREG.SetValueEx(key, APP_NAME, 0, _WINREG.REG_SZ, command)
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, command)
     except PermissionError as exc:
         raise AutostartError("자동 시작 등록 권한이 부족합니다.") from exc
     except OSError as exc:
@@ -62,15 +65,16 @@ def register() -> None:
 def unregister() -> None:
     """Windows 자동 시작 등록을 제거한다."""
     _ensure_windows()
+    winreg = _require_winreg()
 
     try:
-        with _WINREG.OpenKey(
-            _WINREG.HKEY_CURRENT_USER,
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
             RUN_KEY_PATH,
             0,
-            _WINREG.KEY_SET_VALUE,
+            winreg.KEY_SET_VALUE,
         ) as key:
-            _WINREG.DeleteValue(key, APP_NAME)
+            winreg.DeleteValue(key, APP_NAME)
     except FileNotFoundError:
         return
     except PermissionError as exc:
@@ -82,15 +86,16 @@ def unregister() -> None:
 def is_registered() -> bool:
     """현재 실행 경로가 자동 시작에 등록되어 있는지 확인한다."""
     _ensure_windows()
+    winreg = _require_winreg()
 
     try:
-        with _WINREG.OpenKey(
-            _WINREG.HKEY_CURRENT_USER,
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
             RUN_KEY_PATH,
             0,
-            _WINREG.KEY_READ,
+            winreg.KEY_READ,
         ) as key:
-            value, _ = _WINREG.QueryValueEx(key, APP_NAME)
+            value, _ = winreg.QueryValueEx(key, APP_NAME)
     except FileNotFoundError:
         return False
     except PermissionError as exc:
@@ -105,6 +110,12 @@ def _ensure_windows() -> None:
     """Windows 환경과 winreg 가용성을 확인한다."""
     if sys.platform != "win32" or _WINREG is None:
         raise AutostartError("Windows에서만 자동 시작 기능을 사용할 수 있습니다.")
+
+
+def _require_winreg() -> Any:
+    if _WINREG is None:
+        raise AutostartError("Windows에서만 자동 시작 기능을 사용할 수 있습니다.")
+    return _WINREG
 
 
 def _build_launch_command() -> str:

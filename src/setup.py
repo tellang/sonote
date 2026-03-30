@@ -293,7 +293,7 @@ def _verify_model() -> tuple[bool, str]:
                 timeout=10,
             )
             if resp.status_code == 200:
-                return True, f"모델 접근 가능 (첫 실행 시 자동 다운로드)"
+                return True, "모델 접근 가능 (첫 실행 시 자동 다운로드)"
             return False, f"모델 접근 불가 (HTTP {resp.status_code}) — HF 토큰 또는 모델 공개 설정 확인"
         except Exception as e:
             return False, f"모델 확인 실패: {e}"

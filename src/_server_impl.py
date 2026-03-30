@@ -35,6 +35,8 @@ MAX_TRANSCRIPT_HISTORY = 10000  # 전사 내역 최대 세그먼트 수
 _server_state = ServerState(max_transcript_history=MAX_TRANSCRIPT_HISTORY)
 _uvicorn_server = None
 _uvicorn_server_lock = threading.Lock()
+_client_queues = _server_state.client_queues
+_connected_websockets = _server_state.connected_websockets
 
 _STATE_COMPAT_ATTRS: dict[str, str] = {
     "_client_queues": "client_queues",
@@ -82,6 +84,7 @@ _SESSION_ID_RE = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}")
 _SESSION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SESSION_TIME_RE = re.compile(r"\d{6}")
 _RAW_DATA_HEADING_RE = re.compile(r"^#{1,6}\s*Raw Data\s*$", re.IGNORECASE)
+_MEETING_LINE_RE = re.compile(r"^- \[(\d{2}:\d{2}:\d{2})\]\s*(.+?):\s*(.+)$")
 
 # 자동 등록 후보 판별에 필요한 최소 세그먼트 수
 _AUTO_REGISTER_MIN_SEGMENTS = 5
@@ -220,6 +223,40 @@ async def _broadcast_item(item: dict) -> None:
                 dead.append(ws)
         for ws in dead:
             _server_state.connected_websockets.discard(ws)
+
+
+def _meta_segment_count(meta: dict) -> int:
+    raw = meta.get("segment_count", meta.get("segments", 0))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _meta_speaker_count(meta: dict) -> int:
+    if "speaker_count" in meta:
+        try:
+            return max(0, int(meta.get("speaker_count", 0)))
+        except (TypeError, ValueError):
+            return 0
+    speakers = meta.get("speakers", 0)
+    if isinstance(speakers, list):
+        return len(speakers)
+    try:
+        return max(0, int(speakers))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stream_transcript_payload(item: dict) -> dict:
+    payload = {
+        "speaker": item.get("speaker", "?"),
+        "text": item.get("text", ""),
+        "ts": item.get("ts", ""),
+    }
+    if "confidence" in item:
+        payload["confidence"] = item["confidence"]
+    return payload
 
 
 async def _broadcast_sse(event_type: str, payload: dict) -> None:
@@ -623,11 +660,7 @@ async def stream(request: Request) -> StreamingResponse:
                     yield f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     continue
 
-                payload = {
-                    "speaker": item.get("speaker", "?"),
-                    "text": item.get("text", ""),
-                    "ts": item.get("ts", ""),
-                }
+                payload = _stream_transcript_payload(item)
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             _server_state.client_queues.discard(client_queue)
@@ -1026,6 +1059,25 @@ def _trim_meeting_md_transcript(lines: list[str]) -> list[str]:
     return lines
 
 
+def _transcript_lines_to_alignment(lines: list[str]) -> list[dict]:
+    """전사 줄 목록을 alignment 형태 세그먼트로 변환한다."""
+    segments: list[dict] = []
+    for line_text in lines:
+        match = _MEETING_LINE_RE.match(line_text.strip())
+        if not match:
+            continue
+        hh, mm, ss = (int(part) for part in match.group(1).split(":"))
+        segments.append(
+            {
+                "speaker": match.group(2),
+                "text": match.group(3),
+                "start": float(hh * 3600 + mm * 60 + ss),
+                "ts": match.group(1),
+            }
+        )
+    return segments
+
+
 def _scan_sessions() -> list[dict]:
     """output/meetings 디렉토리를 스캔하여 세션 메타데이터 목록을 반환한다."""
     meetings_root = OUTPUT_ROOT / "meetings"
@@ -1054,7 +1106,7 @@ def _scan_sessions() -> list[dict]:
                 # session.json이 있으면 메타데이터 사용
                 try:
                     meta = json.loads(session_json.read_text(encoding="utf-8"))
-                    seg_count = meta.get("segment_count", 0)
+                    seg_count = _meta_segment_count(meta)
                     if seg_count < 1:
                         continue  # 세그먼트 0개 세션 숨김
                     sessions.append({
@@ -1063,7 +1115,7 @@ def _scan_sessions() -> list[dict]:
                         "time": time_str,
                         "duration": meta.get("duration", ""),
                         "segments": seg_count,
-                        "speakers": meta.get("speaker_count", 0),
+                        "speakers": _meta_speaker_count(meta),
                         "path": str(time_dir),
                     })
                     continue
@@ -1193,14 +1245,16 @@ async def get_session(request: Request, session_id: str) -> dict:
                     alignment.append(entry)
         except (json.JSONDecodeError, OSError):
             pass
+    elif transcript_lines:
+        alignment = _transcript_lines_to_alignment(transcript_lines)
 
     return {
         "id": session_id,
         "date": date_str,
         "time": time_str,
         "duration": meta.get("duration", ""),
-        "segments": meta.get("segment_count", 0),
-        "speakers": meta.get("speaker_count", 0),
+        "segments": _meta_segment_count(meta),
+        "speakers": _meta_speaker_count(meta),
         "transcript_source": transcript_source,
         "transcript": transcript_lines,
         "alignment": alignment,
@@ -1733,7 +1787,8 @@ async def update_profile(
             audio_dir = OUTPUT_ROOT / "data" / "speaker_audio"
             audio_dir.mkdir(parents=True, exist_ok=True)
 
-            ext = Path(audio.filename or "audio.wav").suffix or ".wav"
+            filename = audio.filename if audio is not None else "audio.wav"
+            ext = Path(filename or "audio.wav").suffix or ".wav"
             safe_filename = re.sub(r"[^\w\-.]", "_", name) + ext
             audio_path = audio_dir / safe_filename
 
@@ -1971,7 +2026,7 @@ async def push_transcript(
         _server_state.segment_count += 1
     _server_state.speakers.add(normalized_speaker)
 
-    item = {
+    item: dict[str, str | float] = {
         "speaker": normalized_speaker,
         "text": normalized_text,
         "ts": normalized_timestamp,

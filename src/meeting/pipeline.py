@@ -151,9 +151,10 @@ class TranscriptionPipeline:
 
                     chunk = audio_chunk
                     if self._adapter.preprocess_chunk is not None:
-                        chunk = self._adapter.preprocess_chunk(audio_chunk)
-                        if chunk is None:
+                        preprocessed = self._adapter.preprocess_chunk(audio_chunk)
+                        if preprocessed is None:
                             continue
+                        chunk = preprocessed
 
                     stt_segments = self._transcribe(chunk)
 
@@ -201,7 +202,7 @@ class TranscriptionPipeline:
                     continue
                 return
 
-            if requested_device is not _no_switch and requested_device is not None:
+            if isinstance(requested_device, int):
                 previous_device = active_device
                 active_device = requested_device
                 if self._adapter.on_device_switched is not None:

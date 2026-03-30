@@ -4007,6 +4007,22 @@
             }
         }
 
+        function parseTranscriptLines(lines) {
+            if (!Array.isArray(lines)) return [];
+            const parsed = [];
+            for (const line of lines) {
+                const text = String(line || "").trim();
+                const match = text.match(/^- \[(\d{2}:\d{2}:\d{2})\]\s+([^:]+):\s+(.+)$/);
+                if (!match) continue;
+                parsed.push({
+                    ts: match[1],
+                    speaker: match[2].trim(),
+                    text: match[3].trim(),
+                });
+            }
+            return parsed;
+        }
+
         /* === 과거 세션 전사 내용 렌더링 === */
         function renderPastSession(sessionId, data) {
             // 상태 업데이트
@@ -4031,7 +4047,12 @@
             transcriptEl.innerHTML = "";
 
             // 과거 세그먼트 렌더링
-            const segments = data.alignment || data.history || [];
+            const alignmentSegments = Array.isArray(data.alignment) ? data.alignment : [];
+            const historySegments = Array.isArray(data.history) ? data.history : [];
+            const transcriptSegments = parseTranscriptLines(data.transcript || []);
+            const segments = alignmentSegments.length
+                ? alignmentSegments
+                : (historySegments.length ? historySegments : transcriptSegments);
             if (Array.isArray(segments) && segments.length > 0) {
                 // globalSegmentIndex를 리셋하지 않음 (충돌 방지)
                 for (const seg of segments) {
@@ -4477,6 +4498,19 @@
             }
 
             try {
+                const originalInlineStyles = {
+                    border: transcriptContainer.style.border,
+                    borderRadius: transcriptContainer.style.borderRadius,
+                    background: transcriptContainer.style.background,
+                    boxShadow: transcriptContainer.style.boxShadow,
+                    backdropFilter: transcriptContainer.style.backdropFilter,
+                    webkitBackdropFilter: transcriptContainer.style.webkitBackdropFilter,
+                    height: transcriptContainer.style.height,
+                    maxHeight: transcriptContainer.style.maxHeight,
+                    minHeight: transcriptContainer.style.minHeight,
+                    padding: transcriptContainer.style.padding,
+                };
+
                 // PIP 창 열기 (가로 360, 세로 450 정도로 더 콤팩트하게)
                 pipWindow = await window.documentPictureInPicture.requestWindow({
                     width: 360,
@@ -4587,15 +4621,10 @@
                 pipWindow.addEventListener("pagehide", () => {
                     clearInterval(timerUpdateId);
                     const ph = document.getElementById("pip-placeholder");
-// ... 나머지 복구 로직 ...
-                    
+
                     // PiP 모드 클래스 제거 및 스타일 원상 복구
                     transcriptContainer.classList.remove("pip-mode");
-                    transcriptContainer.style.border = "1px solid var(--border-subtle)";
-                    transcriptContainer.style.borderRadius = "16px";
-                    transcriptContainer.style.background = ""; 
-                    transcriptContainer.style.padding = "16px";
-                    transcriptContainer.style.maxHeight = "min(75vh, 800px)";
+                    Object.assign(transcriptContainer.style, originalInlineStyles);
                     
                     if (ph) {
                         ph.parentNode.replaceChild(transcriptContainer, ph);
@@ -5323,6 +5352,9 @@
                     lastItem.text = text.textContent;
                     lastItem.timestamp = ts.textContent;
                 }
+                if (item.confidence != null && item.confidence < 0.7) {
+                    lastLine.classList.add("low-confidence");
+                }
 
                 if (autoScroll) {
                     if (VirtualScroll.enabled) {
@@ -5555,6 +5587,7 @@
                             speaker: msg.speaker,
                             text: msg.text,
                             ts: msg.ts,
+                            confidence: msg.confidence,
                         });
                         showTypingIndicator();
                     } else if (msgType === "correction") {
@@ -5779,8 +5812,8 @@
                 const fullHistory = await res.json();
                 if (!Array.isArray(fullHistory)) return;
 
-                // 현재 표시된 세그먼트 수 (개별 세그먼트 span 기준)
-                const currentCount = transcriptEl.querySelectorAll("[data-segment-index]").length;
+                // DOM 렌더 수는 virtual scroll에서 불완전하므로 누적 인덱스를 기준으로 본다.
+                const currentCount = globalSegmentIndex;
                 if (fullHistory.length > currentCount) {
                     const missed = fullHistory.slice(currentCount);
                     for (const item of missed) {

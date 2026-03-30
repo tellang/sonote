@@ -349,7 +349,7 @@ def _validate_cli_inputs(args: argparse.Namespace) -> None:
 
 
 # --- 서브커맨드별 필수 외부 의존성 (schema 출력에 포함) ---
-_COMMAND_DEPENDENCIES: dict[str, list[dict[str, str]]] = {
+_COMMAND_DEPENDENCIES: dict[str, list[dict[str, Any]]] = {
     "desktop": [
         {"name": "pywebview", "required": True, "description": "네이티브 데스크톱 웹뷰"},
         {"name": "pystray", "required": True, "description": "시스템 트레이 통합"},
@@ -2086,10 +2086,10 @@ def _cmd_meeting_offline(args):
         sys.exit(EXIT_NOT_FOUND)
 
     is_json = getattr(args, "json_mode", False)
-    is_ndjson = getattr(args, "ndjson_mode", False)
+    getattr(args, "ndjson_mode", False)
 
     print(f"[오프라인 회의록] {audio_path}", file=sys.stderr)
-    print(f"[모드] 파일 → 회의록 .md 변환", file=sys.stderr)
+    print("[모드] 파일 → 회의록 .md 변환", file=sys.stderr)
 
     # 디바이스 설정
     device_name = "cpu" if args.cpu else None
@@ -2267,7 +2267,6 @@ def _cmd_meeting(args):
     from .meeting import PipelineAdapter, PipelineContext, run_capture_loop
     from .meeting_writer import MeetingWriter
     from .tray import MeetingTray, is_available as tray_available
-    from .whisper_worker import WhisperWorkerPool
 
     # SSE 서버 시작 (데몬 스레드)
     set_current_audio_device(args.device)
@@ -2388,10 +2387,10 @@ def _cmd_meeting(args):
         import src.server as _srv
 
         def _toggle_pause_from_tray() -> None:
-            _srv._paused = not _srv._paused
+            _srv.toggle_pause_state()
 
         def _shutdown_from_tray() -> None:
-            _srv._shutdown_requested = True
+            _srv.request_shutdown()
 
         tray = MeetingTray(
             port=args.port,
@@ -2981,7 +2980,7 @@ def _cmd_update(args: argparse.Namespace) -> None:
         else:
             print(f"[업데이트] 새 버전 발견: {info.version} (현재: {current_version})")
             print(f"  게시일: {info.published_at}")
-            print(f"  설치: sonote update --install")
+            print("  설치: sonote update --install")
             if info.release_notes:
                 # 릴리스 노트 앞 3줄만 미리보기
                 preview_lines = info.release_notes.strip().splitlines()[:3]
@@ -3083,7 +3082,7 @@ def _cmd_update(args: argparse.Namespace) -> None:
                 "status": "applying",
             }))
         else:
-            print(f"[업데이트] 설치 중... (앱이 재시작됩니다)")
+            print("[업데이트] 설치 중... (앱이 재시작됩니다)")
 
         # 업데이트 적용 (재시작 포함)
         try:

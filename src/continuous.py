@@ -217,7 +217,7 @@ def continuous_live(
                 "-t", str(chunk_seconds),
                 str(chunk_file), "-y",
             ]
-            dl_proc = subprocess.run(
+            subprocess.run(
                 dl_cmd, capture_output=True, timeout=chunk_seconds + 30,
             )
 

@@ -13,11 +13,8 @@
 import json
 import os
 import subprocess
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 class TestSetupImport:
@@ -28,7 +25,7 @@ class TestSetupImport:
         assert callable(run_setup)
 
     def test_import_all_exports(self):
-        from src.setup import run_setup, _SETUP_ITEMS
+        from src.setup import _SETUP_ITEMS
         assert isinstance(_SETUP_ITEMS, list)
         assert len(_SETUP_ITEMS) > 0
 

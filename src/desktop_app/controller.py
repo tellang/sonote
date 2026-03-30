@@ -299,7 +299,7 @@ class DesktopController:
         from ..meeting import PipelineAdapter, PipelineContext, run_capture_loop
 
         capture_switch_event = get_audio_device_switch_event()
-        from ..server import _current_audio_device
+        from ..server import get_current_audio_device
 
         def _on_transcript(payload: dict[str, Any]) -> None:
             push_transcript_sync(payload["speaker"], payload["text"], payload["timestamp"], confidence=payload.get("confidence"))
@@ -400,7 +400,7 @@ class DesktopController:
             run_capture_loop(
                 context,
                 adapter,
-                initial_device=_current_audio_device,
+                initial_device=get_current_audio_device(),
             )
         finally:
             self._capture_stop_event = None

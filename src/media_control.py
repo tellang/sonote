@@ -79,8 +79,8 @@ def _is_target_app(name: str) -> bool:
 
 def _get_audio_sessions_raw() -> list[Any]:
     """pycaw를 사용하여 활성 오디오 세션 목록을 가져온다."""
-    from comtypes import CoInitialize, CoUninitialize  # type: ignore[import-untyped]
-    from pycaw.pycaw import AudioUtilities  # type: ignore[import-untyped]
+    from comtypes import CoInitialize, CoUninitialize
+    from pycaw.pycaw import AudioUtilities
 
     CoInitialize()
     try:

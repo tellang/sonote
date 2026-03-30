@@ -15,6 +15,7 @@ import pytest
 from httpx import ASGITransport
 
 from src import server
+import src._server_impl as server_impl
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +87,31 @@ class TestSSEStreamAndCorrection:
         assert item["ts"] == "00:01:00"
 
         server._client_queues.discard(queue)
+
+    @pytest.mark.asyncio
+    async def test_push_transcript_preserves_confidence_in_queue(self):
+        """실시간 전사 confidence가 브로드캐스트 큐에 유지된다."""
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+        server._client_queues.add(queue)
+
+        await server.push_transcript("화자A", "낮은 신뢰도 발화", "00:01:01", confidence=0.42)
+
+        item = await asyncio.wait_for(queue.get(), timeout=2.0)
+        assert item["confidence"] == 0.42
+
+        server._client_queues.discard(queue)
+
+    def test_stream_transcript_payload_includes_confidence(self):
+        """SSE 기본 transcript payload에 confidence가 포함된다."""
+        payload = server_impl._stream_transcript_payload(
+            {"speaker": "화자A", "text": "테스트", "ts": "00:00:03", "confidence": 0.33}
+        )
+        assert payload == {
+            "speaker": "화자A",
+            "text": "테스트",
+            "ts": "00:00:03",
+            "confidence": 0.33,
+        }
 
     @pytest.mark.asyncio
     async def test_push_correction_broadcasts_correction_event(self):
@@ -464,6 +490,18 @@ class TestHistoryConsistency:
         assert len(data) == 5
         for i in range(5):
             assert data[i]["text"] == f"발화 {i}"
+
+    @pytest.mark.asyncio
+    async def test_history_preserves_confidence(self, client: httpx.AsyncClient):
+        """confidence가 있는 전사는 /history 응답에도 유지된다."""
+        await server.push_transcript("화자A", "신뢰도 테스트", "00:00:01", confidence=0.42)
+
+        response = await client.get("/history")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data) == 1
+        assert data[0]["confidence"] == 0.42
 
 
 # ---------------------------------------------------------------------------

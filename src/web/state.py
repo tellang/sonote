@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from starlette.websockets import WebSocket
-    from watchdog.observers import Observer
 
 
 class ServerState:
@@ -76,7 +75,7 @@ class ServerState:
         # 세션 회전
         self.session_rotate_event = threading.Event()
         self.session_rotate_callback: Callable[[], None] | None = None
-        self.session_observer: Observer | None = None
+        self.session_observer: Any = None
 
     def set_startup_status(self, phase: str, message: str = "", ready: bool = False) -> None:
         self.startup_phase = phase

@@ -225,7 +225,8 @@ def test_find_korean_font_returns_none_when_no_font(monkeypatch: pytest.MonkeyPa
     from src.export import _find_korean_font
 
     monkeypatch.setattr(Path, "is_file", lambda self: False)
-    result = _find_korean_font()
+    with pytest.warns(UserWarning, match="한국어 폰트를 찾을 수 없습니다"):
+        result = _find_korean_font()
     assert result is None
 
 

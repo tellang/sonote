@@ -140,6 +140,22 @@ class TestListSessions:
         assert session["speakers"] == 3
 
     @pytest.mark.asyncio
+    async def test_uses_legacy_session_json_keys_when_needed(self, tmp_path, monkeypatch, client):
+        """레거시 session.json의 segments/speakers 키도 목록에 반영된다."""
+        _create_session_dir(
+            tmp_path, "2026-03-13", "100001",
+            session_meta={"duration": "00:10:00", "segments": 4, "speakers": ["A", "B"]},
+            meeting_lines=["- [00:00:01] A: test"],
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions")
+        data = response.json()
+
+        assert data[0]["segments"] == 4
+        assert data[0]["speakers"] == 2
+
+    @pytest.mark.asyncio
     async def test_sorted_newest_first(self, tmp_path, monkeypatch, client):
         """최신 세션이 먼저 반환된다."""
         _seg = ["- [00:00:01] A: test"]
@@ -271,6 +287,23 @@ class TestGetSession:
         assert data["meta"] == meta
 
     @pytest.mark.asyncio
+    async def test_returns_legacy_session_meta_counts(self, tmp_path, monkeypatch, client):
+        """레거시 session.json의 segments/speakers 키도 상세 응답에 반영된다."""
+        meta = {"duration": "00:12:00", "segments": 6, "speakers": ["A", "B", "C"]}
+        _create_session_dir(
+            tmp_path, "2026-03-13", "150001",
+            session_meta=meta,
+            meeting_lines=["- [00:00:01] A: test"],
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions/2026-03-13_150001")
+        data = response.json()
+
+        assert data["segments"] == 6
+        assert data["speakers"] == 3
+
+    @pytest.mark.asyncio
     async def test_empty_transcript_when_no_file(self, tmp_path, monkeypatch, client):
         """전사 파일이 없으면 빈 리스트를 반환한다."""
         _create_session_dir(tmp_path, "2026-03-13", "160000")
@@ -303,6 +336,30 @@ class TestGetSession:
         assert len(data["alignment"]) == 2
         assert data["alignment"][0]["text"] == "테스트"
         assert data["alignment"][1]["start"] == 1.5
+
+    @pytest.mark.asyncio
+    async def test_fallback_alignment_from_transcript_lines(self, tmp_path, monkeypatch, client):
+        """alignment 파일이 없으면 transcript 줄을 파싱해 alignment를 구성한다."""
+        _create_session_dir(
+            tmp_path,
+            "2026-03-13",
+            "171500",
+            meeting_lines=[
+                "- [00:00:01] 화자A: 첫 줄",
+                "- [00:00:05] 화자B: 둘째 줄",
+            ],
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions/2026-03-13_171500")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["alignment"]) == 2
+        assert data["alignment"][0]["speaker"] == "화자A"
+        assert data["alignment"][0]["text"] == "첫 줄"
+        assert data["alignment"][0]["ts"] == "00:00:01"
+        assert data["alignment"][1]["start"] == 5.0
 
 
 # ---------------------------------------------------------------------------

@@ -291,7 +291,6 @@ class TestExtractEmbeddingFromFile:
         with patch("src.server.sf") if hasattr(server, "sf") else patch.dict(
             "sys.modules", {"soundfile": MagicMock()}
         ):
-            import soundfile as sf_mock
 
             audio_data = np.random.randn(16000 * 2).astype(np.float32)  # 2초 오디오
             wav_path = tmp_path / "test_audio.wav"

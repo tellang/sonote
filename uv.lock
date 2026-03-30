@@ -2756,7 +2756,7 @@ wheels = [
 
 [[package]]
 name = "sonote"
-version = "1.2.0b2"
+version = "2.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

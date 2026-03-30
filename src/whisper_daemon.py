@@ -20,15 +20,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# 보안: 최대 audio 페이로드 100MB (float32 16kHz × ~26분)
-_MAX_AUDIO_BYTES = 100 * 1024 * 1024
-# 보안: 최대 recv 버퍼 128MB (base64 인코딩 오버헤드 포함)
-_MAX_RECV_BYTES = 128 * 1024 * 1024
-
 import numpy as np
 
 from .runtime_env import get_available_vram
 from .whisper_worker import WhisperWorkerPool
+
+# 보안: 최대 audio 페이로드 100MB (float32 16kHz × ~26분)
+_MAX_AUDIO_BYTES = 100 * 1024 * 1024
+# 보안: 최대 recv 버퍼 128MB (base64 인코딩 오버헤드 포함)
+_MAX_RECV_BYTES = 128 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +248,9 @@ class WhisperServiceDaemon(socketserver.ThreadingTCPServer):
 
     def start(self) -> int:
         """lockfile을 작성하고 할당된 포트 번호를 반환한다."""
-        host, port = self.server_address
-        self._write_lockfile(str(host), port)
+        host = str(self.server_address[0])
+        port = int(self.server_address[1])
+        self._write_lockfile(host, port)
         return port
 
     def stop(self) -> None:
@@ -270,7 +271,7 @@ class WhisperServiceDaemon(socketserver.ThreadingTCPServer):
             pass
         self._remove_lockfile()
 
-    def serve_forever(self, poll_interval: float = 0.5) -> None:  # type: ignore[override]
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
         """블로킹 서빙 루프."""
         super().serve_forever(poll_interval=poll_interval)
 

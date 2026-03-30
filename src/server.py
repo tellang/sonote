@@ -23,6 +23,8 @@ MAX_TRANSCRIPT_HISTORY = _impl.MAX_TRANSCRIPT_HISTORY
 
 _state = ServerState(max_transcript_history=MAX_TRANSCRIPT_HISTORY)
 _server_state = _state
+_client_queues = _state.client_queues
+_connected_websockets = _state.connected_websockets
 
 # 내부 구현 모듈이 참조하는 상태 컨테이너를 facade 상태로 통일한다.
 _impl._server_state = _state
@@ -83,6 +85,10 @@ def consume_audio_device_switch() -> tuple[bool, int | None]:
 
 def get_audio_device_switch_event():
     return _state.get_audio_device_switch_event()
+
+
+def get_current_audio_device() -> int | None:
+    return _state.current_audio_device
 
 
 def set_startup_status(phase: str, message: str = "", ready: bool = False) -> None:
@@ -310,6 +316,7 @@ __all__ = [
     "consume_audio_device_switch",
     "get_audio_device_switch_event",
     "set_current_audio_device",
+    "get_current_audio_device",
     "set_startup_status",
     "set_capture_error",
     "set_voice_active",

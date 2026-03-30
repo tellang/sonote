@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import threading
-from functools import partial
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -14,7 +13,6 @@ from src.meeting.context import PipelineContext
 from src.meeting.pipeline import (
     PipelineAdapter,
     TranscriptionPipeline,
-    _DEFAULT_TRANSCRIBE_KWARGS,
     run_capture_loop,
 )
 from src.postprocess import Segment
@@ -771,7 +769,6 @@ class TestRunLoop:
     def test_run_device_switch_during_capture(self):
         """Device switch mid-capture breaks the inner loop and re-enters."""
         chunk = _make_chunk()
-        switch_consumed = [False]
         inner_iterations = [0]
 
         def capture_audio(**kwargs):

@@ -4,11 +4,9 @@
 search, ping/pong), 에러 처리, 동시 연결을 검증한다.
 """
 
-import json
 
 import pytest
 from fastapi.testclient import TestClient
-from starlette.testclient import WebSocketDenialResponse
 
 from src import server
 

@@ -15,7 +15,7 @@ if is_frozen():
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-from src.desktop import main
-
 if __name__ == "__main__":
+    from src.desktop import main
+
     main()
