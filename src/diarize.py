@@ -577,9 +577,10 @@ class SpeakerDiarizer:
             self._seg_model = seg_model
 
             # Powerset → multi-label 변환기 (최대 3화자, 최대 2명 동시)
-            self._to_multilabel = Powerset(
+            _powerset = Powerset(
                 num_classes=3, max_set_size=2,
-            ).to_multilabel
+            ).to(self._torch_device)
+            self._to_multilabel = _powerset.to_multilabel
         except Exception as exc:
             print(f"[화자 분리] segmentation-3.0 로드 실패: {exc}")
             print("[화자 분리] 기존 방식(전체 청크 임베딩)으로 동작합니다.")

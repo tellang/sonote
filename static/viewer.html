@@ -1336,11 +1336,16 @@
         .pip-mode p {
             padding: 2px 0 !important;
             grid-template-columns: 3px 1fr !important;
+            grid-template-areas: none !important;
             gap: 8px !important;
             border: none !important;
             line-height: 1.3 !important;
             word-break: normal !important;
         }
+
+        .pip-mode .timestamp { grid-area: unset !important; }
+        .pip-mode .speaker-label { grid-area: unset !important; }
+        .pip-mode .text { grid-area: unset !important; }
 
         .pip-mode .timestamp {
             display: none !important;
@@ -1362,7 +1367,7 @@
             font-size: 14px !important;
             line-height: 1.45 !important;
             letter-spacing: -0.02em;
-            word-break: break-all !important;
+            word-break: keep-all !important;
             overflow-wrap: break-word !important;
         }
 
