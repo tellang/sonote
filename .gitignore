@@ -42,3 +42,22 @@ build/
 
 # 파인튜닝 모델 (1.5GB+)
 models/
+
+# 커버리지
+.coverage
+coverage.json
+htmlcov/
+
+# 벤치마크
+benchmark/
+
+# 임시 실행/분석 스크립트
+_run_*.py
+PRD_*.md
+SETUP_DOCTOR_ANALYSIS.md
+
+# 테스트 오디오 픽스처 (대용량)
+tests/fixtures/*.wav
+
+# 외부 전사 파일
+*_transcript.txt
