@@ -2660,6 +2660,7 @@ def _cmd_meeting(args):
                 "start": payload["start"],
                 "end": payload["end"],
                 "feedback_text": payload["feedback_text"],
+                "confidence": payload.get("confidence"),
             },
         )
         print(f"[{payload['timestamp']}] [{payload['speaker']}] {payload['text']}")

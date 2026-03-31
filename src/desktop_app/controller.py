@@ -21,6 +21,7 @@ from ..server import (
     consume_session_rotate,
     create_app,
     get_audio_device_switch_event,
+    get_keywords_snapshot,
     is_paused,
     is_shutdown_requested,
     push_correction_sync,
@@ -308,6 +309,12 @@ class DesktopController:
                     payload["speaker"],
                     payload["text"],
                     payload["timestamp"],
+                    metadata={
+                        "start": payload.get("start"),
+                        "end": payload.get("end"),
+                        "feedback_text": payload.get("feedback_text"),
+                        "confidence": payload.get("confidence"),
+                    },
                 )
 
         def _submit_correction(batch: list[str], idx: int) -> Any:
@@ -414,6 +421,7 @@ class DesktopController:
             elapsed_sec = int(time.time() - self._capture_start_time)
             elapsed_str = _format_elapsed(elapsed_sec)
             seg_count = len(old_writer._segments)
+            old_writer.set_keywords(get_keywords_snapshot())
             old_writer.write_footer(
                 duration=elapsed_str,
                 segment_count=seg_count,
@@ -583,6 +591,7 @@ class DesktopController:
             elapsed_sec = int(time.time() - self._capture_start_time) if self._capture_start_time > 0 else 0
             elapsed_str = _format_elapsed(elapsed_sec)
             seg_count = len(writer._segments)
+            writer.set_keywords(get_keywords_snapshot())
             writer.write_footer(
                 duration=elapsed_str,
                 segment_count=seg_count,

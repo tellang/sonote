@@ -1085,15 +1085,30 @@
         }
         #control-collapse-btn:hover { opacity: 1; }
 
-        .page.controls-collapsed #status-bar .status-group-device,
         .page.controls-collapsed #status-bar .status-group:last-child,
-        .page.controls-collapsed #keyword-section,
         .page.controls-collapsed #enroll-panel {
             display: none !important;
         }
         .page.controls-collapsed #status-bar {
-            padding: 6px 16px;
+            padding: 8px 12px;
             gap: 8px;
+        }
+        .page.controls-collapsed #status-bar .status-group {
+            gap: 8px;
+        }
+        .page.controls-collapsed #status-bar .status-group-device {
+            display: flex !important;
+            min-width: 220px;
+            flex: 1 1 220px;
+            justify-content: flex-end;
+        }
+        .page.controls-collapsed #keyword-section {
+            margin-top: -6px;
+            margin-bottom: 0;
+        }
+        .page.controls-collapsed #keyword-toggle {
+            padding: 6px 12px;
+            font-size: var(--text-xs);
         }
 
         /* === 키워드 섹션 === */
@@ -1274,8 +1289,8 @@
         /* === 전사 영역 === */
         #transcript {
             flex: 1;
-            min-height: min(65vh, 500px);
-            max-height: min(75vh, 800px);
+            min-height: clamp(360px, 56vh, 640px);
+            max-height: none;
             overflow-y: auto;
             border-radius: 16px;
             padding: 16px;
@@ -2153,6 +2168,7 @@
             #transcript {
                 padding: 12px;
                 border-radius: 12px;
+                min-height: 55vh;
             }
 
             #transcript p {
@@ -2207,7 +2223,7 @@
             #transcript {
                 padding: 8px;
                 border-radius: 10px;
-                min-height: min(50vh, 300px);
+                min-height: 52vh;
             }
 
             #transcript p {
@@ -3736,6 +3752,60 @@
             sidebarOpen: window.innerWidth > 768,  // 모바일에서는 기본 접힘
         };
 
+        let sessionListRefreshTimer = null;
+        let historySessionRefreshTimer = null;
+
+        function scheduleSessionListRefresh(delay = 0) {
+            if (sessionListRefreshTimer) {
+                clearTimeout(sessionListRefreshTimer);
+            }
+            sessionListRefreshTimer = setTimeout(() => {
+                sessionListRefreshTimer = null;
+                loadSessionList();
+            }, Math.max(0, delay));
+        }
+
+        function scheduleCurrentSessionRefresh(sessionId, delay = 250) {
+            const targetId = String(sessionId || "").trim();
+            if (!targetId) return;
+            if (AppState.currentView !== "history" || AppState.currentSessionId !== targetId) return;
+
+            if (historySessionRefreshTimer) {
+                clearTimeout(historySessionRefreshTimer);
+            }
+            historySessionRefreshTimer = setTimeout(() => {
+                historySessionRefreshTimer = null;
+                if (AppState.currentView === "history" && AppState.currentSessionId === targetId) {
+                    loadSession(targetId);
+                }
+            }, Math.max(0, delay));
+        }
+
+        function handleSessionEvent(eventType, payload = {}) {
+            const sessionId = String(payload?.session_id || payload?.id || "").trim();
+            if (eventType === "session_deleted") {
+                if (
+                    sessionId
+                    && AppState.currentView === "history"
+                    && AppState.currentSessionId === sessionId
+                ) {
+                    returnToLiveSession();
+                }
+                scheduleSessionListRefresh(0);
+                return;
+            }
+
+            if (eventType === "session_updated") {
+                scheduleSessionListRefresh(100);
+                scheduleCurrentSessionRefresh(sessionId, 200);
+                return;
+            }
+
+            if (eventType === "session_created") {
+                scheduleSessionListRefresh(100);
+            }
+        }
+
         /* === 사이드바 토글 === */
         function toggleSidebar() {
             AppState.sidebarOpen = !AppState.sidebarOpen;
@@ -4012,8 +4082,12 @@
             const parsed = [];
             for (const line of lines) {
                 const text = String(line || "").trim();
-                const match = text.match(/^- \[(\d{2}:\d{2}:\d{2})\]\s+([^:]+):\s+(.+)$/);
-                if (!match) continue;
+                const match = text.match(/^- \[(\d{2}:\d{2}:\d{2})\]\s+([^:]+):\s+(.+)$/)
+                    || text.match(/^- \[(\d{2}:\d{2}:\d{2})\]\s+\[([^\]]+)\]\s+(.+)$/)
+                    || text.match(/^\[(\d{2}:\d{2}:\d{2})\]\s+\[([^\]]+)\]\s+(.+)$/);
+                if (!match) {
+                    continue;
+                }
                 parsed.push({
                     ts: match[1],
                     speaker: match[2].trim(),
@@ -4021,6 +4095,52 @@
                 });
             }
             return parsed;
+        }
+
+        function normalizeSessionSegment(item) {
+            if (!item || typeof item !== "object") return null;
+
+            const text = String(item.text || "").trim();
+            if (!text) return null;
+
+            const speaker = String(item.speaker || "?").trim() || "?";
+            const ts = String(item.ts || item.timestamp || "").trim();
+            const normalized = {
+                speaker,
+                text,
+                ts: ts || "--:--:--",
+            };
+
+            if (typeof item.start === "number") normalized.start = item.start;
+            if (typeof item.end === "number") normalized.end = item.end;
+
+            const confidence = Number(item.confidence);
+            if (Number.isFinite(confidence)) {
+                normalized.confidence = confidence;
+            }
+            return normalized;
+        }
+
+        function collectViewerSegments(data) {
+            const candidates = [
+                Array.isArray(data.display_segments) ? data.display_segments : [],
+                Array.isArray(data.alignment) ? data.alignment : [],
+                Array.isArray(data.history) ? data.history : [],
+                parseTranscriptLines(data.transcript || []),
+            ];
+            const selected = candidates.find((items) => items.length > 0) || [];
+            const result = [];
+            let previousKey = null;
+
+            for (const item of selected) {
+                const segment = normalizeSessionSegment(item);
+                if (!segment) continue;
+                const currentKey = `${segment.ts}|${segment.speaker}|${segment.text}`;
+                if (currentKey === previousKey) continue;
+                previousKey = currentKey;
+                result.push(segment);
+            }
+            return result;
         }
 
         /* === 과거 세션 전사 내용 렌더링 === */
@@ -4039,6 +4159,20 @@
                 source.close();
                 source = null;
             }
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+
+            // WS 경로도 동일하게 정리 (dev toggle parity)
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
+            if (wsConnection) {
+                try { wsConnection.close(1000, "history_view"); } catch (e) { /* 무시 */ }
+                wsConnection = null;
+            }
 
             // 가상 스크롤 리셋
             VirtualScroll.reset();
@@ -4046,13 +4180,8 @@
             // 메인 전사 영역 비우기
             transcriptEl.innerHTML = "";
 
-            // 과거 세그먼트 렌더링
-            const alignmentSegments = Array.isArray(data.alignment) ? data.alignment : [];
-            const historySegments = Array.isArray(data.history) ? data.history : [];
-            const transcriptSegments = parseTranscriptLines(data.transcript || []);
-            const segments = alignmentSegments.length
-                ? alignmentSegments
-                : (historySegments.length ? historySegments : transcriptSegments);
+            // 과거 세그먼트 렌더링 (viewer 전용 정규화 payload 우선)
+            const segments = collectViewerSegments(data);
             if (Array.isArray(segments) && segments.length > 0) {
                 // globalSegmentIndex를 리셋하지 않음 (충돌 방지)
                 for (const seg of segments) {
@@ -4151,7 +4280,11 @@
             // 히스토리 재로드 + SSE 재연결
             globalSegmentIndex = 0;
             loadHistory().finally(() => {
-                connectStream();
+                if (useWebSocket) {
+                    connectWebSocket();
+                } else {
+                    connectStream();
+                }
             });
 
             // 사이드바 활성 항목 갱신
@@ -4195,7 +4328,11 @@
                 }
 
                 // SSE 재연결
-                connectStream();
+                if (useWebSocket) {
+                    connectWebSocket();
+                } else {
+                    connectStream();
+                }
                 showToast("새 세션이 시작되었습니다", "success");
             } catch (e) {
                 console.error("[사이드바] 새 세션 시작 실패:", e.message);
@@ -4384,9 +4521,7 @@
                     console.debug("[LivePiP] 메시지 파싱 실패:", e.message);
                 }
             };
-            livePipSource.addEventListener("session_created", loadSessionList);
-            livePipSource.addEventListener("session_updated", loadSessionList);
-            livePipSource.addEventListener("session_deleted", loadSessionList);
+            attachSessionSSEListeners(livePipSource);
             livePipSource.onerror = () => {
                 if (!livePipOverlayEl && livePipSource) {
                     livePipSource.close();
@@ -5440,8 +5575,10 @@
             icon.textContent = collapsed ? "\u25BC \uD3BC\uCE58\uAE30" : "\u25B2 \uC811\uAE30";
             localStorage.setItem("controlsCollapsed", collapsed ? "1" : "");
         }
-        // 초기 상태 복원
-        if (localStorage.getItem("controlsCollapsed") === "1") {
+        // 초기 상태 복원 (기본: 작은 뷰포트에서는 compact 우선)
+        const collapsedPref = localStorage.getItem("controlsCollapsed");
+        const shouldCollapseByDefault = collapsedPref === null && window.innerHeight <= 900;
+        if (collapsedPref === "1" || shouldCollapseByDefault) {
             document.querySelector(".page").classList.add("controls-collapsed");
             document.getElementById("control-collapse-icon").textContent = "\u25BC \uD3BC\uCE58\uAE30";
         }
@@ -5600,13 +5737,9 @@
                     } else if (msgType === "keywords_updated") {
                         if (AppState.currentView === "live") renderKeywordChips(msg);
                     } else if (msgType === "session_created" || msgType === "session_updated") {
-                        loadSessionList();
+                        handleSessionEvent(msgType, msg);
                     } else if (msgType === "session_deleted") {
-                        const deletedId = msg.id || msg.session_id;
-                        if (deletedId && AppState.currentView === "history" && AppState.currentSessionId === deletedId) {
-                            returnToLiveSession();
-                        }
-                        loadSessionList();
+                        handleSessionEvent(msgType, msg);
                     } else if (msgType === "speaker_edited") {
                         // 화자 수정 브로드캐스트 반영
                         const segSpan = transcriptEl.querySelector(`[data-segment-index="${msg.index}"]`);
@@ -6872,23 +7005,21 @@
 
         /* === SSE 세션 이벤트 리스너 등록 === */
         function attachSessionSSEListeners(eventSource) {
-            eventSource.addEventListener("session_created", () => {
-                loadSessionList();
-            });
-            eventSource.addEventListener("session_updated", () => {
-                loadSessionList();
-            });
-            eventSource.addEventListener("session_deleted", (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    const deletedId = data.id || data.session_id;
-                    // 현재 보고 있는 세션이 삭제된 경우 실시간으로 복귀
-                    if (deletedId && AppState.currentView === "history" && AppState.currentSessionId === deletedId) {
-                        returnToLiveSession();
+            const bind = (eventType) => {
+                eventSource.addEventListener(eventType, (event) => {
+                    let payload = {};
+                    try {
+                        payload = event?.data ? JSON.parse(event.data) : {};
+                    } catch (e) {
+                        payload = {};
                     }
-                } catch (e) { /* 파싱 실패 무시 */ }
-                loadSessionList();
-            });
+                    handleSessionEvent(eventType, payload);
+                });
+            };
+
+            bind("session_created");
+            bind("session_updated");
+            bind("session_deleted");
         }
 
         /* === devMode: WS/SSE 토글 표시 제어 === */
