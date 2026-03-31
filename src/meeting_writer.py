@@ -86,7 +86,9 @@ class MeetingWriter:
         self._artifacts[name] = str(Path(path))
 
     def append_alignment(self, payload: dict[str, Any]) -> None:
-        self._alignment_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        entry = dict(payload)
+        entry.setdefault("entry_kind", "raw_stt")
+        self._alignment_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self._alignment_file.flush()
 
     def append_segment(
@@ -106,6 +108,7 @@ class MeetingWriter:
         }
         if metadata:
             record.update(metadata)
+        record.setdefault("entry_kind", "display_segment")
         self._segments.append(record)
 
         self._raw_file.write(f"[{timestamp}] [{normalized_speaker}] {text}\n")
@@ -282,8 +285,8 @@ class MeetingWriter:
         }
         if duration_text is not None:
             payload["duration_text"] = duration_text
-        kw = keywords or self._keywords
-        if kw:
+        kw = keywords if keywords is not None else self._keywords
+        if kw is not None:
             payload["keywords"] = kw
 
         try:

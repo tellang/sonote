@@ -85,6 +85,11 @@ _SESSION_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _SESSION_TIME_RE = re.compile(r"\d{6}")
 _RAW_DATA_HEADING_RE = re.compile(r"^#{1,6}\s*Raw Data\s*$", re.IGNORECASE)
 _MEETING_LINE_RE = re.compile(r"^- \[(\d{2}:\d{2}:\d{2})\]\s*(.+?):\s*(.+)$")
+_MEETING_BRACKET_LINE_RE = re.compile(r"^- \[(\d{2}:\d{2}:\d{2})\]\s*\[(.+?)\]\s*(.+)$")
+_RAW_SEGMENT_LINE_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s*\[(.+?)\]\s*(.+)$")
+
+_DISPLAY_ENTRY_KINDS = {"display", "display_segment", "viewer_segment", "segment"}
+_RAW_ENTRY_KINDS = {"raw", "raw_stt", "alignment", "stt_segment"}
 
 # 자동 등록 후보 판별에 필요한 최소 세그먼트 수
 _AUTO_REGISTER_MIN_SEGMENTS = 5
@@ -1063,8 +1068,13 @@ def _transcript_lines_to_alignment(lines: list[str]) -> list[dict]:
     """전사 줄 목록을 alignment 형태 세그먼트로 변환한다."""
     segments: list[dict] = []
     for line_text in lines:
-        match = _MEETING_LINE_RE.match(line_text.strip())
-        if not match:
+        stripped = line_text.strip()
+        match = (
+            _MEETING_LINE_RE.match(stripped)
+            or _MEETING_BRACKET_LINE_RE.match(stripped)
+            or _RAW_SEGMENT_LINE_RE.match(stripped)
+        )
+        if match is None:
             continue
         hh, mm, ss = (int(part) for part in match.group(1).split(":"))
         segments.append(
@@ -1076,6 +1086,113 @@ def _transcript_lines_to_alignment(lines: list[str]) -> list[dict]:
             }
         )
     return segments
+
+
+def _entry_confidence(entry: dict) -> float | None:
+    confidence = entry.get("confidence")
+    if isinstance(confidence, (int, float)):
+        return round(max(0.0, min(1.0, float(confidence))), 3)
+
+    avg_logprob = entry.get("avg_logprob")
+    if isinstance(avg_logprob, (int, float)):
+        return round(max(0.0, min(1.0, 1.0 + float(avg_logprob))), 3)
+    return None
+
+
+def _is_display_alignment_entry(entry: dict) -> bool:
+    kind = str(entry.get("entry_kind") or entry.get("kind") or "").strip().lower()
+    if kind in _DISPLAY_ENTRY_KINDS:
+        return True
+    if kind in _RAW_ENTRY_KINDS:
+        return False
+
+    if "raw_text" in entry:
+        return False
+    if "timestamp" in entry or "ts" in entry:
+        return True
+    if "speaker" in entry and "text" in entry:
+        return True
+    if "text" in entry and ("start" in entry or "end" in entry) and "words" not in entry:
+        return True
+    return False
+
+
+def _normalize_display_segment(entry: dict) -> dict | None:
+    text = str(entry.get("text") or "").strip()
+    if not text:
+        return None
+
+    speaker = str(entry.get("speaker") or "?").strip() or "?"
+    timestamp = str(entry.get("ts") or entry.get("timestamp") or "").strip()
+
+    payload: dict[str, str | float] = {
+        "speaker": speaker,
+        "text": text,
+    }
+    if timestamp:
+        payload["ts"] = timestamp
+
+    start = entry.get("start")
+    if isinstance(start, (int, float)):
+        payload["start"] = float(start)
+
+    end = entry.get("end")
+    if isinstance(end, (int, float)):
+        payload["end"] = float(end)
+
+    confidence = _entry_confidence(entry)
+    if confidence is not None:
+        payload["confidence"] = confidence
+
+    return payload
+
+
+def _load_alignment_display_segments(alignment_file: Path) -> tuple[list[dict], list[dict]]:
+    display_segments: list[dict] = []
+    raw_entries: list[dict] = []
+    previous_signature: tuple[str, str, str, float | None, float | None] | None = None
+
+    for line in alignment_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entry = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+
+        if _is_display_alignment_entry(entry):
+            segment = _normalize_display_segment(entry)
+            if segment is None:
+                continue
+            signature = (
+                str(segment.get("ts", "")),
+                str(segment.get("speaker", "")),
+                str(segment.get("text", "")),
+                float(segment["start"]) if "start" in segment else None,
+                float(segment["end"]) if "end" in segment else None,
+            )
+            if signature == previous_signature:
+                continue
+            previous_signature = signature
+            display_segments.append(segment)
+            continue
+
+        raw_entries.append(entry)
+
+    return display_segments, raw_entries
+
+
+def _count_segment_lines(lines: list[str]) -> int:
+    return sum(
+        1
+        for line in lines
+        if _MEETING_LINE_RE.match(line.strip())
+        or _MEETING_BRACKET_LINE_RE.match(line.strip())
+        or _RAW_SEGMENT_LINE_RE.match(line.strip())
+    )
 
 
 def _scan_sessions() -> list[dict]:
@@ -1122,19 +1239,33 @@ def _scan_sessions() -> list[dict]:
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            # 폴백: 디렉토리 구조 + transcript 파일에서 추출
+            # 폴백: alignment(display) → meeting.md → meeting.raw.txt 순으로 계산
             segment_count = 0
-            for candidate in ("meeting.md", "meeting.raw.txt", "meeting.stt.jsonl"):
-                transcript_file = time_dir / candidate
-                if transcript_file.is_file():
+            alignment_file = time_dir / "meeting.stt.jsonl"
+            if alignment_file.is_file():
+                try:
+                    display_segments, _ = _load_alignment_display_segments(alignment_file)
+                    segment_count = len(display_segments)
+                except OSError:
+                    segment_count = 0
+
+            if segment_count < 1:
+                meeting_md = time_dir / "meeting.md"
+                if meeting_md.is_file():
                     try:
-                        lines = transcript_file.read_text(encoding="utf-8").splitlines()
-                        segment_count = sum(
-                            1 for ln in lines if ln.startswith("- [") or (candidate.endswith(".jsonl") and ln.strip())
-                        )
+                        lines = meeting_md.read_text(encoding="utf-8").splitlines()
+                        segment_count = _count_segment_lines(_trim_meeting_md_transcript(lines))
                     except OSError:
-                        pass
-                    break
+                        segment_count = 0
+
+            if segment_count < 1:
+                meeting_raw = time_dir / "meeting.raw.txt"
+                if meeting_raw.is_file():
+                    try:
+                        lines = meeting_raw.read_text(encoding="utf-8").splitlines()
+                        segment_count = _count_segment_lines(lines)
+                    except OSError:
+                        segment_count = 0
 
             if segment_count < 1:
                 continue  # 세그먼트 0개 세션 숨김
@@ -1228,36 +1359,34 @@ async def get_session(request: Request, session_id: str) -> dict:
                 pass
             break
 
-    # alignment 로드 (있으면)
+    # alignment(display/raw) 로드
     alignment: list[dict] = []
+    raw_alignment: list[dict] = []
     alignment_file = session_dir / "meeting.stt.jsonl"
     if alignment_file.is_file():
         try:
-            for line in alignment_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
-                    entry = json.loads(line)
-                    # avg_logprob → confidence 변환 (뷰어 low-confidence 표시용)
-                    if "confidence" not in entry and "avg_logprob" in entry:
-                        lp = entry["avg_logprob"]
-                        if isinstance(lp, (int, float)):
-                            entry["confidence"] = round(max(0.0, min(1.0, 1.0 + lp)), 3)
-                    alignment.append(entry)
-        except (json.JSONDecodeError, OSError):
+            alignment, raw_alignment = _load_alignment_display_segments(alignment_file)
+        except OSError:
             pass
     elif transcript_lines:
         alignment = _transcript_lines_to_alignment(transcript_lines)
+
+    segments_count = _meta_segment_count(meta)
+    if segments_count < 1 and alignment:
+        segments_count = len(alignment)
 
     return {
         "id": session_id,
         "date": date_str,
         "time": time_str,
         "duration": meta.get("duration", ""),
-        "segments": _meta_segment_count(meta),
+        "segments": segments_count,
         "speakers": _meta_speaker_count(meta),
         "transcript_source": transcript_source,
         "transcript": transcript_lines,
         "alignment": alignment,
+        "display_segments": alignment,
+        "raw_alignment": raw_alignment,
         "keywords": meta.get("keywords", {}),
         "meta": meta,
     }

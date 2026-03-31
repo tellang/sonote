@@ -20,6 +20,8 @@ from src.polish import (
     _get_cached_correction,
     _run_ollama,
     _set_cached_correction,
+    _run_gemini,
+    extract_keywords_with_gemini,
     extract_keywords_with_ollama,
     summarize_with_ollama,
 )
@@ -464,6 +466,41 @@ class TestDomainKeywordInjection:
             keywords = extract_keywords_with_ollama("텍스트")
 
         assert keywords == []
+
+
+class TestGeminiMcpWarningSanitization:
+    """Gemini 출력의 MCP 경고문 제거 회귀를 검증한다."""
+
+    def test_run_gemini_strips_mcp_warning_line(self):
+        fake_result = mock.MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = (
+            "MCP issues detected. Run /mcp list for status.\n"
+            "Python, FastAPI"
+        )
+        fake_result.stderr = ""
+
+        with mock.patch("src.polish.subprocess.run", return_value=fake_result):
+            ok, text = _run_gemini("키워드 추출 프롬프트")
+
+        assert ok is True
+        assert "MCP issues detected" not in text
+        assert text == "Python, FastAPI"
+
+    def test_extract_keywords_with_gemini_excludes_warning_token(self):
+        fake_result = mock.MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = (
+            "MCP issues detected. Run /mcp list for status.\n"
+            "LangGraph, Whisper, FastAPI"
+        )
+        fake_result.stderr = ""
+
+        with mock.patch("src.polish.subprocess.run", return_value=fake_result):
+            keywords = extract_keywords_with_gemini("회의 텍스트")
+
+        assert "MCP issues detected. Run /mcp list for status." not in keywords
+        assert keywords == ["LangGraph", "Whisper", "FastAPI"]
 
 
 # ---------------------------------------------------------------

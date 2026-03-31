@@ -35,6 +35,14 @@ class MeetingWriterArtifactTests(unittest.TestCase):
             writer.append_audio(np.zeros(1600, dtype=np.float32))
             writer.append_alignment({"kind": "stt_segment", "text": "테스트"})
             writer.append_segment("A", "안녕하세요", "00:00:01", {"start": 0.0, "end": 1.0})
+            writer.set_keywords(
+                {
+                    "manual": ["안건"],
+                    "extracted": [],
+                    "promoted": [],
+                    "blocked": [],
+                }
+            )
             review_path = writer.write_profile_review(
                 {
                     "profiles_source": "base.json",
@@ -48,10 +56,19 @@ class MeetingWriterArtifactTests(unittest.TestCase):
             self.assertTrue(writer.alignment_path.exists())
             self.assertTrue(review_path.exists())
 
+            alignment_entries = [
+                json.loads(line)
+                for line in writer.alignment_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(alignment_entries[0]["entry_kind"], "raw_stt")
+            self.assertEqual(alignment_entries[1]["entry_kind"], "display_segment")
+
             session_path = output_path.parent / "session.json"
             session = json.loads(session_path.read_text(encoding="utf-8"))
             self.assertIn("session_audio", session["artifacts"])
             self.assertEqual(session["segment_count"], 1)
+            self.assertEqual(session["keywords"]["manual"], ["안건"])
 
     def test_writer_renders_grouped_paragraph_section_and_preserves_raw_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

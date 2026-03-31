@@ -223,6 +223,50 @@ class TestListSessions:
         assert len(data) == 1
         assert data[0]["segments"] == 1
 
+    @pytest.mark.asyncio
+    async def test_hides_zero_segment_session_from_list(self, tmp_path, monkeypatch, client):
+        """segment_count가 0인 세션은 목록에서 숨긴다."""
+        _create_session_dir(
+            tmp_path,
+            "2026-03-13",
+            "120001",
+            session_meta={"duration": "00:00:10", "segment_count": 0, "speaker_count": 1},
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    @pytest.mark.asyncio
+    async def test_prefers_display_segments_from_alignment_for_count(self, tmp_path, monkeypatch, client):
+        """meeting.raw.txt가 있어도 display alignment 기준으로 세그먼트 수를 계산한다."""
+        session_dir = _create_session_dir(tmp_path, "2026-03-13", "120002")
+        (session_dir / "meeting.raw.txt").write_text(
+            "[00:00:01] [A] 첫 줄\n",
+            encoding="utf-8",
+        )
+        (session_dir / "meeting.stt.jsonl").write_text(
+            json.dumps(
+                {
+                    "entry_kind": "display_segment",
+                    "timestamp": "00:00:01",
+                    "speaker": "A",
+                    "text": "첫 줄",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["segments"] == 1
+
 
 # ---------------------------------------------------------------------------
 # 2. GET /api/sessions/{session_id} — 세션 상세
@@ -338,6 +382,74 @@ class TestGetSession:
         assert data["alignment"][1]["start"] == 1.5
 
     @pytest.mark.asyncio
+    async def test_meeting_md_transcript_excludes_raw_data_section(self, tmp_path, monkeypatch, client):
+        """meeting.md의 # Raw Data 이후 내용은 transcript 응답에서 제외한다."""
+        _create_session_dir(
+            tmp_path,
+            "2026-03-13",
+            "170100",
+            meeting_lines=[
+                "# 회의록",
+                "",
+                "- [00:00:01] 화자A: 인사",
+                "",
+                "# Raw Data",
+                "",
+                "- [00:00:01] [화자A] raw line",
+            ],
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions/2026-03-13_170100")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert "# Raw Data" not in data["transcript"]
+        assert all("raw line" not in line for line in data["transcript"])
+
+    @pytest.mark.asyncio
+    async def test_filters_raw_alignment_entries_from_viewer_alignment(self, tmp_path, monkeypatch, client):
+        """raw alignment 엔트리는 분리하고 viewer alignment에는 display 엔트리만 반환한다."""
+        session_dir = _create_session_dir(
+            tmp_path,
+            "2026-03-13",
+            "170200",
+            meeting_lines=["- [00:00:01] 화자A: 인사"],
+        )
+        entries = [
+            {
+                "entry_kind": "raw_stt",
+                "kind": "stt_segment",
+                "speaker": "화자A",
+                "raw_text": "인사",
+                "text": "인사",
+                "avg_logprob": -0.2,
+            },
+            {
+                "entry_kind": "display_segment",
+                "timestamp": "00:00:01",
+                "speaker": "화자A",
+                "text": "인사",
+                "avg_logprob": -0.2,
+            },
+        ]
+        (session_dir / "meeting.stt.jsonl").write_text(
+            "\n".join(json.dumps(item, ensure_ascii=False) for item in entries),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("src.server.OUTPUT_ROOT", tmp_path)
+
+        response = await client.get("/api/sessions/2026-03-13_170200")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert len(data["alignment"]) == 1
+        assert len(data["display_segments"]) == 1
+        assert len(data["raw_alignment"]) == 1
+        assert data["alignment"][0]["speaker"] == "화자A"
+        assert data["alignment"][0]["confidence"] == 0.8
+
+    @pytest.mark.asyncio
     async def test_fallback_alignment_from_transcript_lines(self, tmp_path, monkeypatch, client):
         """alignment 파일이 없으면 transcript 줄을 파싱해 alignment를 구성한다."""
         _create_session_dir(
@@ -397,6 +509,24 @@ class TestNewSession:
         assert response.status_code == 200
 
         assert server._session_rotate_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_resets_keyword_state(self, client):
+        """새 세션 시작 시 live keyword 상태를 모두 초기화한다."""
+        server._manual_keywords.update({"수동1", "수동2"})
+        server._extracted_keywords.add("추출")
+        server._promoted_keywords.add("승격")
+        server._blocked_keywords.add("차단")
+        server._keyword_seen_counts["추출"] = 3
+
+        response = await client.post("/api/sessions/new")
+        assert response.status_code == 200
+
+        assert server._manual_keywords == set()
+        assert server._extracted_keywords == set()
+        assert server._promoted_keywords == set()
+        assert server._blocked_keywords == set()
+        assert server._keyword_seen_counts == {}
 
     @pytest.mark.asyncio
     async def test_does_not_call_callback_directly(self, client):

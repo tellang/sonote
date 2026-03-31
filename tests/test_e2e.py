@@ -309,7 +309,9 @@ async def test_meeting_pipeline_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             assert detail["transcript_source"] == "meeting.md"
             assert any("첫 번째 발화입니다" in line for line in detail["transcript"])
             assert any("두 번째 발화입니다" in line for line in detail["transcript"])
-            assert len(detail["alignment"]) == 4
+            assert len(detail["alignment"]) == 2
+            assert len(detail["display_segments"]) == 2
+            assert len(detail["raw_alignment"]) == 2
 
             # API: history
             history_response = await client.get("/history")
